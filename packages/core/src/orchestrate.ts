@@ -1,7 +1,8 @@
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_LIMITS, DEFAULT_REVIEW, type Limits, type ReviewConfig } from './config.ts';
+import { DEFAULT_LIMITS, DEFAULT_REVIEW, type Limits, type PlanningConfig, type ReviewConfig } from './config.ts';
+import { decidePlanApproval } from './planning.ts';
 import { GitHubForge, prNumber, type Forge } from './forge.ts';
 import { OctetError } from './errors.ts';
 import {
@@ -12,7 +13,7 @@ import { checkRemote, childEnv, getIdentity, type Identity } from './identity.ts
 import { loadPersona } from './personas.ts';
 import { getProject, type Project } from './project.ts';
 import type { AgentRunner } from './runner.ts';
-import { newId, type Approval, type Bead, type Goal, type PullRequest, type Store } from './store.ts';
+import { newId, OPEN_GOAL_STATUSES, type Approval, type Bead, type Goal, type PullRequest, type Store } from './store.ts';
 import { evaluate } from './warden.ts';
 
 export interface Ctx {
@@ -22,6 +23,7 @@ export interface Ctx {
   runner: AgentRunner;
   limits?: Limits;
   review?: ReviewConfig;
+  planning?: PlanningConfig;
   forge?: Forge;
   /** Where engineer output is kept, one file per run: `<runsDir>/<bead>/<n>.log`. Unset = not persisted. */
   runsDir?: string;
@@ -46,9 +48,9 @@ function projectOf(ctx: Ctx, name: string): { project: Project; identity: Identi
 const limitsOf = (ctx: Ctx): Limits => ctx.limits ?? DEFAULT_LIMITS;
 
 /** Chair: turns a request into a goal with its own branch and worktree. */
-export function createGoal(ctx: Ctx, input: { project: string; title: string }): Goal {
+export function createGoal(ctx: Ctx, input: { project: string; title: string; status?: Goal['status'] }): Goal {
   const { project, identity } = projectOf(ctx, input.project);
-  const active = ctx.store.listGoals().filter((g) => g.status === 'active').length;
+  const active = ctx.store.listGoals().filter((g) => OPEN_GOAL_STATUSES.includes(g.status)).length;
   if (active >= limitsOf(ctx).maxActiveGoals) {
     throw new OctetError(`Active-goal limit reached (${limitsOf(ctx).maxActiveGoals}). Finish or deliver a goal first.`);
   }
@@ -65,7 +67,7 @@ export function createGoal(ctx: Ctx, input: { project: string; title: string }):
 
   ensureExcluded(project.path, env);
   addWorktree(project.path, worktree, branch, defaultBranch(project.path, env), env);
-  const goal = ctx.store.insertGoal({ id, project: project.name, title: input.title, branch, worktree });
+  const goal = ctx.store.insertGoal({ id, project: project.name, title: input.title, branch, worktree, ...(input.status ? { status: input.status } : {}) });
   ctx.store.log({ kind: 'goal.created', goalId: id, seat: 'chair', data: { branch, identity: identity.id } });
   return goal;
 }
@@ -73,7 +75,7 @@ export function createGoal(ctx: Ctx, input: { project: string; title: string }):
 /** Marshal: breaks a goal into beads. Decomposition is manual for now. */
 export function addBead(
   ctx: Ctx,
-  input: { goalId: string; title: string; brief: string; dependsOn?: string[] },
+  input: { goalId: string; title: string; brief: string; dependsOn?: string[]; planId?: string; planItem?: string },
 ): Bead {
   const goal = ctx.store.getGoal(input.goalId);
   if (!goal) throw new OctetError(`Unknown goal "${input.goalId}"`);
@@ -85,6 +87,7 @@ export function addBead(
   const bead = ctx.store.insertBead({
     id, goalId: goal.id, title: input.title, brief: input.brief, dependsOn: input.dependsOn ?? [],
     branch: `octet/${goal.id}/${id}`, worktree: worktreePath(project.path, id),
+    ...(input.planId ? { planId: input.planId } : {}), ...(input.planItem ? { planItem: input.planItem } : {}),
   });
   ctx.store.log({ kind: 'bead.created', goalId: goal.id, beadId: id, seat: 'marshal', data: { title: input.title } });
   return bead;
@@ -93,7 +96,7 @@ export function addBead(
 const AGENTS_MD_CAP = 8_000;
 
 /** The repo's AGENTS.md, if any, so builders follow the project's own build/test/style rules. */
-function projectInstructions(worktree: string): string | undefined {
+export function projectInstructions(worktree: string): string | undefined {
   const file = join(worktree, 'AGENTS.md');
   if (!existsSync(file)) return undefined;
   const text = readFileSync(file, 'utf8');
@@ -474,6 +477,7 @@ export function decideApproval(ctx: Ctx, approvalId: string, decision: 'approve'
   const approval = ctx.store.getApproval(approvalId);
   if (!approval) throw new OctetError(`Unknown approval "${approvalId}"`);
   if (approval.kind === 'deliver') return decideDeliver(ctx, approvalId, decision);
+  if (approval.kind === 'plan') return decidePlanApproval(ctx, approvalId, decision);
 
   if (!ctx.store.decideApproval(approvalId, decision === 'approve' ? 'approved' : 'denied')) {
     throw new OctetError(`Approval ${approvalId} was already decided`);

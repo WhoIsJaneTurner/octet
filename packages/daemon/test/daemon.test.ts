@@ -36,14 +36,14 @@ before(async () => {
   const identitiesFile = join(home, 'identities.toml');
   writeFileSync(identitiesFile, '[identities.wijt]\nname="Bot"\nemail="wijt@example.com"\nssh_key="/nonexistent"\ngh_user="WhoIsJaneTurner"\n');
   const projectsFile = join(home, 'projects.toml');
-  writeFileSync(projectsFile, `[projects.demo]\npath = "${repo}"\nidentity = "wijt"\n`);
+  writeFileSync(projectsFile, `[projects.demo]\npath = "${repo}"\nidentity = "wijt"\nvault = "${join(home, 'vault')}"\n`);
   runsDir = join(home, 'runs');
   const uiDir = join(home, 'ui') + '/'; // trailing slash, as the real entrypoint passes it
   mkdirSync(join(uiDir, 'assets'), { recursive: true });
   writeFileSync(join(uiDir, 'index.html'), '<meta name="octet-token" content="__OCTET_TOKEN__">');
   writeFileSync(join(uiDir, 'assets', 'a.js'), 'console.log(1)');
   writeFileSync(join(home, 'secret.txt'), 'top secret');
-  d = await startDaemon({ store: new Store(':memory:'), runner, forge, runsDir, identitiesFile, projectsFile, uiDir });
+  d = await startDaemon({ store: new Store(':memory:'), runner, forge, runsDir, limits: { maxEngineers: 3, maxActiveGoals: 20, runTimeoutMs: 60_000 }, identitiesFile, projectsFile, uiDir });
 });
 after(() => d.close());
 
@@ -184,4 +184,57 @@ test('requests over HTTP: file, route, decline; the source cannot be spoofed and
   const st = (await call('/api/state')).body;
   assert.equal(st.requests.length, 2);
   assert.equal(st.audit.ok, true);
+});
+
+test('planning over HTTP: request, plan, approve, and the scheduler builds and reviews the beads on its own', async () => {
+  const post = (path: string, body: unknown = {}) => call(path, { method: 'POST', body: JSON.stringify(body) });
+  const beads = [
+    { id: 'b1', title: 'First', objective: 'do 1', files: ['src/one.ts'], acceptance: ['1 works'], out_of_scope: [], depends_on: [], size: 's' },
+    { id: 'b2', title: 'Second', objective: 'do 2', files: ['src/two.ts'], acceptance: ['2 works'], out_of_scope: [], depends_on: ['b1'], size: 's' },
+  ];
+  runner.script('architect', [JSON.stringify({ approach: 'Two steps.', not_doing: ['nothing else'], risks: ['r'], verification: ['tests'], beads })]);
+  runner.replies.reviewer = 'Fine.\nVERDICT: APPROVE';
+  const r = (await post('/api/requests', { title: 'Plan me', body: 'x', project: 'demo' })).body;
+  assert.equal((await post(`/api/requests/${r.id}/plan`)).status, 202);
+  await waitFor(async () => (await call('/api/state')).body.plans.some((p: any) => p.requestId === r.id && p.status === 'awaiting_approval'));
+  let st = (await call('/api/state')).body;
+  const plan = st.plans.find((p: any) => p.requestId === r.id);
+  const approval = st.approvals.find((a: any) => a.kind === 'plan' && a.summary.planId === plan.id);
+  assert.equal(approval.summary.beads.length, 2);
+  assert.equal(st.beads.filter((b: any) => b.goalId === plan.goalId).length, 0); // nothing before approval
+  assert.equal((await call(`/api/plans/${plan.id}`)).body.plan.beads.length, 2);
+
+  assert.equal((await post(`/api/approvals/${approval.id}/approve`)).status, 200);
+  // Plan-gated: b1 is built and reviewed automatically; b2 waits for the human merge of b1.
+  await waitFor(async () => (await call('/api/state')).body.beads.some((b: any) => b.planItem === 'b1' && b.status === 'in_review'));
+  await waitFor(async () => (await call('/api/state')).body.events.some((e: any) => e.kind === 'review.verdict'));
+  st = (await call('/api/state')).body;
+  const b1 = st.beads.find((b: any) => b.planItem === 'b1' && b.goalId === plan.goalId);
+  assert.equal(st.beads.find((b: any) => b.planItem === 'b2' && b.goalId === plan.goalId).status, 'todo');
+  assert.equal((await post(`/api/beads/${b1.id}/approve`)).status, 200);
+  await waitFor(async () => (await call('/api/state')).body.beads.some((b: any) => b.planItem === 'b2' && b.goalId === plan.goalId && b.status === 'in_review'));
+
+  assert.equal(st.planAudit.ok, true);
+  const audit = (await call('/api/audit/verify')).body;
+  assert.equal(audit.ok, true);
+  assert.equal(audit.plans.ok, true);
+});
+
+test('rejecting a plan with feedback over HTTP re-plans; pausing a goal and resolving an escalation work', async () => {
+  const post = (path: string, body: unknown = {}) => call(path, { method: 'POST', body: JSON.stringify(body) });
+  const one = [{ id: 'b1', title: 'Only', objective: 'o', files: [], acceptance: ['a'], out_of_scope: [], depends_on: [], size: 'xs' }];
+  const plan = (approach: string) => JSON.stringify({ approach, not_doing: ['x'], risks: [], verification: ['v'], beads: one });
+  runner.script('architect', [plan('First try.'), plan('Second try.')]);
+  const r = (await post('/api/requests', { title: 'Replan me', project: 'demo' })).body;
+  await post(`/api/requests/${r.id}/plan`);
+  await waitFor(async () => (await call('/api/state')).body.plans.some((p: any) => p.requestId === r.id));
+  const v1 = (await call('/api/state')).body.plans.find((p: any) => p.requestId === r.id);
+  assert.equal((await post(`/api/plans/${v1.id}/reject`, {})).status, 400); // feedback required
+  assert.equal((await post(`/api/plans/${v1.id}/reject`, { feedback: 'smaller' })).status, 202);
+  await waitFor(async () => (await call('/api/state')).body.plans.some((p: any) => p.requestId === r.id && p.version === 2));
+  const st = (await call('/api/state')).body;
+  assert.equal(st.plans.find((p: any) => p.id === v1.id).status, 'rejected');
+  assert.equal((await post(`/api/goals/${v1.goalId}/pause`)).body.paused, true);
+  assert.equal((await post(`/api/goals/${v1.goalId}/resume`)).body.paused, false);
+  assert.equal((await post('/api/escalations/esc-nope/resolve')).status, 404);
 });

@@ -123,18 +123,18 @@ Octet may then ask the Reviewer or Architect for a short **retro** (three bullet
 
 Trade-off: it puts planning detail into the repository's history. Default off for work where plans contain more than the code does.
 
-## 9. Implementation checklist
+## 9. Implementation checklist (all built except where marked)
 
-- [ ] `vault.ts`: `openVault(project)`, `savePlan`, `saveScout`, `appendDecision`, `writeOutcome`, `verifyPlans`
-- [ ] Atomic write helper and lock file
-- [ ] Renderer: plan JSON to Markdown, scout JSON to Markdown, index and README
-- [ ] Front matter reader and writer (a tiny YAML subset; do not add a heavy dependency)
-- [ ] Hash recording in events; `plan.saved` and `plan.approved`; verify on Marshal start
-- [ ] `octet audit verify` extension
-- [ ] Git commits with the project identity; head hash anchoring
-- [ ] Related-plan search (title, files, keywords)
-- [ ] Redaction pass
-- [ ] Tests: atomicity, tamper detection (edit an approved plan file, expect escalation), versioning and supersede, front matter round trip, related-plan search
+- [x] `vault.ts`: `openVault(project)`, `savePlan`, `saveScout`, `appendDecision`, `writeOutcome`, `verifyPlans`
+- [x] Atomic write helper and lock file
+- [x] Renderer: plan JSON to Markdown, scout JSON to Markdown, index and README
+- [x] Front matter reader and writer (a tiny YAML subset; do not add a heavy dependency)
+- [x] Hash recording in events; `plan.saved` and `plan.approved`; verify on Marshal start
+- [x] `octet audit verify` extension
+- [x] Git commits with the project identity; head hash anchoring
+- [x] Related-plan search (title, files, keywords). Searches the prior plans' own files, since the new request has no files yet; the Scout (step 9) will pass its relevant files in
+- [x] Redaction pass
+- [x] Tests: atomicity, tamper detection (edit an approved plan file, expect escalation), versioning and supersede, front matter round trip, related-plan search
 
 ## 10. Open decisions
 
@@ -142,3 +142,13 @@ Trade-off: it puts planning detail into the repository's history. Default off fo
 2. **Git remote for the vault.** Useful as an anchor and a backup, but it publishes planning detail. Keep it off until you decide.
 3. **Plans in the repo** (§8): off by default.
 4. **Embeddings for related-plan search.** Defer.
+
+## 11. As built
+
+- Code: `vault.ts`, `plan.ts` (schema, validator, renderers), `planning.ts` (Architect round, plan gate, decomposition, `verifyPlans`), `frontmatter.ts`, `redact.ts`.
+- Per-project settings in `projects.toml`: `vault`, `vault_git`, `vault_in_repo`, `autonomy`. Set them with `octet project set <name> --vault <dir> [--vault-git] [--vault-in-repo] [--autonomy <level>]`.
+- A plan's JSON is stored in camelCase (the validated form). Model replies may use snake_case; both are accepted.
+- Redaction runs on requests, scout reports, plans and decision lines before they are written. The plan hash covers the redacted file that was written.
+- Tamper handling: approval is refused if the file's hash differs from the saved one, and decomposition re-checks. Either pauses the goal and opens a `plan_tamper` escalation. `octet audit verify` and `/api/audit/verify` also check every plan against its recorded and audited hash.
+- Head anchoring needs `vault_git`. The vault's own history is the external anchor; adding a remote is still your decision.
+- Database schema changes are now ordered migrations with a version table; an existing database is copied to `octet.db.bak-v<N>` before migrating.

@@ -31,8 +31,23 @@ function seatLine(id: string, s: State): SeatLine {
       return n ? { state: 'WAITING ON YOU', cls: 'cyan', note: `${n} bead${n > 1 ? 's' : ''} to review (you are the reviewer for now)` }
         : { state: 'MANUAL', cls: 'dim', note: 'you review diffs until this seat is built' };
     }
-    case 'marshal': return { state: 'MANUAL', cls: 'dim', note: 'you add beads and merge; the Marshal agent is not built yet' };
-    case 'chair': return { state: 'MANUAL', cls: 'dim', note: 'you create goals; the Chair agent is not built yet' };
+    case 'marshal': {
+      const n = s.escalations.length;
+      return n ? { state: 'NEEDS YOU', cls: 'amber', note: `${n} thing${n > 1 ? 's' : ''} the scheduler cannot decide` }
+        : { state: 'SCHEDULING', cls: '', note: 'turns approved plans into beads and runs them within the caps (deterministic code)' };
+    }
+    case 'architect': {
+      const n = s.planning.length;
+      const waiting = s.plans.filter((p) => p.status === 'awaiting_approval').length;
+      return n ? { state: 'PLANNING', cls: 'amber', note: `${n} request${n > 1 ? 's' : ''} being planned` }
+        : waiting ? { state: 'WAITING ON YOU', cls: 'cyan', note: `${waiting} plan${waiting > 1 ? 's' : ''} to approve in the inbox` }
+          : { state: 'IDLE', cls: 'dim', note: 'plans a routed request when you press PLAN (needs a project vault)' };
+    }
+    case 'chair': {
+      const n = s.requests.filter((r) => r.status === 'new').length;
+      return n ? { state: 'WAITING ON YOU', cls: 'cyan', note: `${n} request${n > 1 ? 's' : ''} to route` }
+        : { state: 'INTAKE', cls: 'dim', note: 'takes typed requests; clarifying questions are not built yet' };
+    }
     default: return { state: 'NOT BUILT', cls: 'faint', note: 'persona written, no runtime yet' };
   }
 }
@@ -80,14 +95,18 @@ const LANES: { key: Bead['status'][]; title: string }[] = [
   { key: ['merged'], title: 'merged' },
 ];
 
-export function Board({ goal, beads, selected, onSelect, tag }: {
+export function Board({ goal, beads, selected, onSelect, tag, onTogglePause }: {
   goal: Goal | undefined; beads: Bead[]; selected: string | undefined;
-  onSelect: (id: string) => void; tag: React.ReactNode;
+  onSelect: (id: string) => void; tag: React.ReactNode; onTogglePause?: () => void;
 }) {
   if (!goal) return <span className="faint">No goal selected. Create one from the left panel.</span>;
   return (
     <>
-      <div className="row"><b>{goal.title}</b> {tag} <span className="faint">{goal.branch}</span></div>
+      <div className="row">
+        <b>{goal.title}</b> {tag} <span className="faint">{goal.branch}</span>
+        <span className={goal.status === 'active' ? 'dim' : 'cyan'}>[{goal.status.replace('_', ' ')}{goal.paused ? ', paused' : ''}]</span>
+        {onTogglePause && goal.status === 'active' && beads.some((b) => b.planId) && <button onClick={onTogglePause}>{goal.paused ? 'RESUME SCHEDULER' : 'PAUSE SCHEDULER'}</button>}
+      </div>
       <div className="cols">
         {LANES.map((lane) => {
           const items = beads.filter((b) => lane.key.includes(b.status));

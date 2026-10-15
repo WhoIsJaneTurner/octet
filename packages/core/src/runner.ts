@@ -99,8 +99,15 @@ export class FakeRunner implements AgentRunner {
   readonly calls: RunRequest[] = [];
   /** Scripted replies by seat, e.g. a Reviewer verdict. */
   readonly replies: Partial<Record<SeatId, string>> = {};
+  private readonly queues = new Map<SeatId, string[]>();
+  /** Replies handed out in order, one per call, before falling back to `replies`: e.g. a malformed one, then a valid one. */
+  script(seat: SeatId, replies: string[]): void {
+    this.queues.set(seat, [...(this.queues.get(seat) ?? []), ...replies]);
+  }
   /** Seats that block until their signal aborts or their timeout elapses, like a stuck agent. */
   readonly hang = new Set<SeatId>();
+  /** Exit code to report per seat (default 0): lets a test make the engineer fail. */
+  readonly exit = new Map<SeatId, number>();
   async run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
     this.calls.push(req);
     if (this.hang.has(req.seat)) {
@@ -117,8 +124,8 @@ export class FakeRunner implements AgentRunner {
       });
     }
     if (req.seat === 'engineer') writeFileSync(join(req.cwd, `${req.seat}-output.txt`), req.prompt);
-    const output = this.replies[req.seat] ?? 'fake run complete\n';
+    const output = this.queues.get(req.seat)?.shift() ?? this.replies[req.seat] ?? 'fake run complete\n';
     onChunk?.(output);
-    return { exitCode: 0, output, durationMs: 1 };
+    return { exitCode: this.exit.get(req.seat) ?? 0, output, durationMs: 1 };
   }
 }

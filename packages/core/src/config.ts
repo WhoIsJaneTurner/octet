@@ -48,3 +48,31 @@ export function loadLimits(file: string = join(octetHome(), 'config.toml')): Lim
     runTimeoutMs: positive(doc.limits?.run_timeout_minutes, DEFAULT_LIMITS.runTimeoutMs / 60_000) * 60_000,
   };
 }
+
+export interface PlanningConfig {
+  /** Most beads one plan may contain. */
+  maxBeads: number;
+  /** Sum of bead sizes (xs=1, s=2, m=4) one goal may reach. */
+  maxPoints: number;
+  /** Agent runs one goal may use, as a multiple of its bead count, before the scheduler escalates. */
+  maxRunsFactor: number;
+  /** Times a failed bead is retried before the scheduler asks you. */
+  maxRetries: number;
+  /** Minutes a runnable bead may wait on the engineer cap before the scheduler escalates. */
+  capWaitMinutes: number;
+}
+
+export const DEFAULT_PLANNING: PlanningConfig = { maxBeads: 12, maxPoints: 36, maxRunsFactor: 3, maxRetries: 2, capWaitMinutes: 30 };
+
+/** Reads `[planning]` from config.toml. Missing file or keys use defaults. */
+export function loadPlanning(file: string = join(octetHome(), 'config.toml')): PlanningConfig {
+  if (!existsSync(file)) return { ...DEFAULT_PLANNING };
+  const t = (parse(readFileSync(file, 'utf8')) as { planning?: Record<string, unknown> }).planning ?? {};
+  return {
+    maxBeads: positive(t.max_beads, DEFAULT_PLANNING.maxBeads),
+    maxPoints: positive(t.max_points, DEFAULT_PLANNING.maxPoints),
+    maxRunsFactor: positive(t.max_runs_factor, DEFAULT_PLANNING.maxRunsFactor),
+    maxRetries: typeof t.max_retries === 'number' && Number.isInteger(t.max_retries) && t.max_retries >= 0 ? t.max_retries : DEFAULT_PLANNING.maxRetries,
+    capWaitMinutes: positive(t.cap_wait_minutes, DEFAULT_PLANNING.capWaitMinutes),
+  };
+}

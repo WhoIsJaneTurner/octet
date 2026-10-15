@@ -1,20 +1,30 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import {
-  addBead, addProject, approveBead, cancelBead, ClaudeCodeRunner, createGoal, dbFile, decideApproval, FakeRunner, getIdentity,
-  ghToken, loadIdentities, loadLimits, loadProjects, loadReview, OctetError, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
+  addBead, addProject, approveBead, cancelBead, ClaudeCodeRunner, createGoal, dbFile, decideApproval, editPlan, FakeRunner, getIdentity,
+  ghToken, loadIdentities, loadLimits, loadProjects, loadPlanning, loadReview, OctetError, openVault, planRequest, rejectPlan, rejectRequest, renderPlan, updateProject, verifyPlans, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
 } from '@octet/core';
 
 const USAGE = `octet <command>
 
   identity list                     show configured identities
   identity doctor                   verify each identity's SSH key and gh login
-  project add <name> <path> --identity <id>
+  project add <name> <path> --identity <id> [--vault <dir>] [--vault-git] [--vault-in-repo] [--autonomy <level>]
+  project set <name> [--vault <dir>] [--vault-git] [--vault-in-repo] [--autonomy manual|plan-gated|auto-to-pr]
   project list
   ask <project> <title> [--body <text>]   file a request (a project is required here)
   request list                      requests and where they stand
   request route <id> <project>      pick the project for an unrouted request
   request reject <id> <reason>      decline a request; nothing else is created
+  request plan <id>                 have the Architect write a plan (needs a project vault)
+  plan list                         plans and where they stand
+  plan show <id>                    print a plan
+  plan approve <id>                 approve it; the Marshal creates its beads
+  plan reject <id> <feedback>       send it back; the Architect plans again
+  plan edit <id> --file <json>      replace the plan with your edit (saved as a new version)
+  goal pause|resume <goal>          stop or restart the scheduler for a goal
+  escalation list|resolve <id>      things the scheduler needs you for
   goal new <project> <title>
   goal list
   bead add <goal> <title> --brief <text> [--after <bead>]...
@@ -41,6 +51,7 @@ function makeCtx(fake: boolean): Ctx {
     runner: fake ? new FakeRunner() : new ClaudeCodeRunner(),
     limits: loadLimits(),
     review: loadReview(),
+    planning: loadPlanning(),
     runsDir: runsDir(),
   };
 }
@@ -53,6 +64,11 @@ async function main(argv: string[]): Promise<void> {
       identity: { type: 'string' },
       brief: { type: 'string' },
       body: { type: 'string' },
+      vault: { type: 'string' },
+      'vault-git': { type: 'boolean' },
+      'vault-in-repo': { type: 'boolean' },
+      autonomy: { type: 'string' },
+      file: { type: 'string' },
       after: { type: 'string', multiple: true },
       fake: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -60,6 +76,10 @@ async function main(argv: string[]): Promise<void> {
   });
   const [group, cmd, ...rest] = positionals;
   if (values.help || !group) return void console.log(USAGE);
+  const projectOpts = () => ({
+    ...(values.vault ? { vault: values.vault } : {}), ...(values['vault-git'] ? { vaultGit: true } : {}),
+    ...(values['vault-in-repo'] ? { vaultInRepo: true } : {}), ...(values.autonomy ? { autonomy: values.autonomy } : {}),
+  });
 
   if (group === 'identity') {
     const ids = loadIdentities();
@@ -88,11 +108,17 @@ async function main(argv: string[]): Promise<void> {
       if (!name || !path) throw new OctetError('usage: project add <name> <path> --identity <id>');
       const ids = loadIdentities();
       getIdentity(ids, values.identity);
-      const p = addProject({ name, path, identity: values.identity! }, ids);
+      const p = addProject({ name, path, identity: values.identity!, ...projectOpts() }, ids);
       return void console.log(`added ${p.name} -> ${p.path} as ${p.identity}`);
     }
+    if (cmd === 'set') {
+      const [name] = rest;
+      if (!name) throw new OctetError('usage: project set <name> [--vault <dir>] [--vault-git] [--vault-in-repo] [--autonomy <level>]');
+      const p = updateProject(name, projectOpts());
+      return void console.log(`${p.name}: vault=${p.vault ?? '(none: planning off)'} git=${Boolean(p.vaultGit)} in-repo=${Boolean(p.vaultInRepo)} autonomy=${p.autonomy ?? 'plan-gated'}`);
+    }
     if (cmd === 'list') {
-      for (const p of loadProjects()) console.log(`${p.name.padEnd(16)} ${p.identity.padEnd(10)} ${p.path}`);
+      for (const p of loadProjects()) console.log(`${p.name.padEnd(16)} ${p.identity.padEnd(10)} ${(p.autonomy ?? 'plan-gated').padEnd(11)} ${p.vault ? 'vault' : 'no vault'.padEnd(5)}  ${p.path}`);
       return;
     }
   }
@@ -121,6 +147,13 @@ async function main(argv: string[]): Promise<void> {
       const r = routeRequest(ctx, id, project);
       return void console.log(`request ${r.id}: routed to ${r.project}`);
     }
+    if (cmd === 'plan') {
+      const [id] = rest;
+      if (!id) throw new OctetError('usage: request plan <id>');
+      console.log('The Architect is reading the repository and writing a plan. This can take a few minutes...');
+      const rec = await planRequest(makeCtx(Boolean(values.fake)), id);
+      return void console.log(`plan ${rec.id} v${rec.version} is waiting for you (hash ${rec.contentHash.slice(0, 12)}).\nRead it: octet plan show ${rec.id}\nThen: octet plan approve ${rec.id}   or   octet plan reject ${rec.id} "what to change"`);
+    }
     if (cmd === 'reject') {
       const [id, ...reason] = rest;
       if (!id || !reason.length) throw new OctetError('usage: request reject <id> <reason>');
@@ -128,7 +161,65 @@ async function main(argv: string[]): Promise<void> {
     }
   }
 
+  if (group === 'plan') {
+    const ctx = makeCtx(Boolean(values.fake));
+    if (cmd === 'list') {
+      for (const p of ctx.store.listPlans()) console.log(`${p.id.padEnd(13)} v${p.version} ${p.status.padEnd(18)} ${p.goalId}`);
+      return;
+    }
+    const [id, ...more] = rest;
+    if (!id) throw new OctetError(`usage: plan ${cmd ?? '<command>'} <id>`);
+    const rec = ctx.store.getPlan(id);
+    if (!rec) throw new OctetError(`Unknown plan "${id}"`);
+    const goal = ctx.store.getGoal(rec.goalId)!;
+    const project = ctx.projects.find((p) => p.name === goal.project)!;
+    const vault = openVault(project, ctx.identities.find((i) => i.id === project.identity)!);
+    const slug = rec.vaultPath.replace(/^plans\//, '');
+    if (cmd === 'show') {
+      const { plan } = vault.readPlan(slug, rec.version);
+      console.log(`${renderPlan(plan, goal.title)}\nstatus: ${rec.status}   hash: ${rec.contentHash.slice(0, 12)}   file: ${vault.path(`${rec.vaultPath}/plan.v${rec.version}.md`)}`);
+      return;
+    }
+    if (cmd === 'approve') {
+      const a = ctx.store.listApprovals().find((x) => x.kind === 'plan' && x.status === 'pending' && (x.summary as { planId?: string }).planId === id);
+      if (!a) throw new OctetError(`Plan ${id} has no pending approval (status: ${rec.status})`);
+      decideApproval(ctx, a.id, 'approve');
+      const beads = ctx.store.listBeads(rec.goalId).filter((b) => b.planId === id);
+      return void console.log(`plan ${id} approved; ${beads.length} bead(s) created:\n${beads.map((b) => `  ${b.id}  ${b.title}`).join('\n')}\nThe daemon's scheduler will run them; or: octet bead run <bead>`);
+    }
+    if (cmd === 'reject') {
+      if (!more.length) throw new OctetError('usage: plan reject <id> <feedback>');
+      console.log('The Architect is planning again...');
+      const next = await rejectPlan(ctx, id, more.join(' '));
+      return void console.log(`plan ${next.id} v${next.version} is waiting for you. Read it: octet plan show ${next.id}`);
+    }
+    if (cmd === 'edit') {
+      if (!values.file) throw new OctetError('usage: plan edit <id> --file <plan.json>');
+      const next = editPlan(ctx, id, JSON.parse(readFileSync(values.file, 'utf8')));
+      return void console.log(`saved as plan ${next.id} v${next.version}; it needs approval: octet plan approve ${next.id}`);
+    }
+  }
+
+  if (group === 'escalation') {
+    const store = new Store(dbFile());
+    if (cmd === 'list') {
+      for (const e of store.listEscalations(true)) console.log(`${e.id.padEnd(11)} ${e.reason.padEnd(20)} ${e.goalId}${e.beadId ? `/${e.beadId}` : ''}  ${e.message}`);
+      return;
+    }
+    if (cmd === 'resolve' && rest[0]) {
+      if (!store.resolveEscalation(rest[0])) throw new OctetError(`No open escalation "${rest[0]}"`);
+      return void console.log(`resolved ${rest[0]}`);
+    }
+  }
+
   if (group === 'goal') {
+    if ((cmd === 'pause' || cmd === 'resume') && rest[0]) {
+      const store = new Store(dbFile());
+      if (!store.getGoal(rest[0])) throw new OctetError(`Unknown goal "${rest[0]}"`);
+      store.setGoalPaused(rest[0], cmd === 'pause');
+      store.log({ kind: cmd === 'pause' ? 'goal.paused' : 'goal.resumed', goalId: rest[0] });
+      return void console.log(`goal ${rest[0]}: ${cmd}d`);
+    }
     if (cmd === 'new') {
       const [project, ...title] = rest;
       if (!project || !title.length) throw new OctetError('usage: goal new <project> <title>');
@@ -221,16 +312,19 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (group === 'audit' && cmd === 'verify') {
-    const c = new Store(dbFile()).verifyChain();
+    const ctx = makeCtx(true);
+    const c = ctx.store.verifyChain();
     console.log(c.ok ? `audit chain ok: ${c.checked} events, head ${c.head.slice(0, 12)}` : `AUDIT CHAIN BROKEN at event ${String(c.brokenAt)}: ${String(c.reason)}`);
-    process.exitCode = c.ok ? 0 : 1;
+    const p = verifyPlans(ctx);
+    console.log(p.ok ? `plans ok: ${p.checked} checked against their recorded hashes` : `PLANS DO NOT MATCH THEIR RECORDS:\n${p.problems.map((x) => `  ${x.plan}: ${x.problem}`).join('\n')}`);
+    process.exitCode = c.ok && p.ok ? 0 : 1;
     return;
   }
 
   if (group === 'status') {
     const store = new Store(dbFile());
     for (const g of store.listGoals()) {
-      console.log(`${g.id}  [${g.status}]  ${g.title}  (${g.branch})`);
+      console.log(`${g.id}  [${g.status}${g.paused ? ', paused' : ''}]  ${g.title}  (${g.branch})`);
       for (const b of store.listBeads(g.id)) console.log(`  ${b.id}  ${b.status.padEnd(10)} ${b.title}`);
     }
     return;

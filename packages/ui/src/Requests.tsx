@@ -41,13 +41,13 @@ const STATE: Record<Request['status'], { glyph: string; cls: string }> = {
 };
 
 /** Requests that still need you: route the unrouted ones, or decline any that have not been planned. */
-export function RequestList({ requests, projects, onDone, setError }: {
-  requests: Request[]; projects: Project[]; onDone: () => void; setError: (m: string | null) => void;
+export function RequestList({ requests, projects, planning, onDone, setError }: {
+  requests: Request[]; projects: Project[]; planning: string[]; onDone: () => void; setError: (m: string | null) => void;
 }) {
   const [pick, setPick] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const open = requests.filter((r) => r.status === 'new' || r.status === 'routed');
-  const act = async (id: string, what: 'route' | 'reject', body: Record<string, string>) => {
+  const act = async (id: string, what: 'route' | 'reject' | 'plan', body: Record<string, string>) => {
     setBusy(id); setError(null);
     try { await api(`/api/requests/${id}/${what}`, body); } catch (e) { setError((e as Error).message); }
     finally { setBusy(null); onDone(); }
@@ -70,6 +70,9 @@ export function RequestList({ requests, projects, onDone, setError }: {
               {projects.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
             </select>
             <button disabled={busy === r.id || !(pick[r.id] ?? r.project) || (pick[r.id] ?? r.project) === r.project} onClick={() => void act(r.id, 'route', { project: pick[r.id]! })}>ROUTE</button>
+            {r.project && <button disabled={busy === r.id || planning.includes(r.id) || r.status === 'new'} onClick={() => void act(r.id, 'plan', {})}>
+              {planning.includes(r.id) ? 'PLANNING…' : r.status === 'planning' ? 'PLAN AGAIN' : 'PLAN'}
+            </button>}
             <button disabled={busy === r.id} onClick={() => reject(r.id)}>DECLINE</button>
           </div>
         </div>

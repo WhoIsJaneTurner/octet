@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { api, useOctet } from './api';
 import { Detail } from './Detail';
-import { Inbox } from './Approvals';
+import { Escalations, Inbox } from './Approvals';
 import { NewRequest, RequestList } from './Requests';
 import { Board, Council, Log, PrCard } from './views';
 import { IdentityTag } from './ui';
@@ -103,6 +103,7 @@ export function App() {
         <span className={state.running.length ? 'amber' : 'dim'}>{state.running.length}/{state.limits.maxEngineers} running</span>
         <span className={state.audit.ok ? 'dim' : 'red'} title={state.audit.ok ? `head ${state.audit.head.slice(0, 12)}` : state.audit.reason}>{state.audit.ok ? `audit ✔ ${state.audit.checked}` : '✖ AUDIT CHAIN BROKEN'}</span>
         {state.requests.some((r) => r.status === 'new') && <span className="cyan">? {state.requests.filter((r) => r.status === 'new').length} to route</span>}
+        {state.escalations.length > 0 && <span className="amber">! {state.escalations.length} need{state.escalations.length === 1 ? 's' : ''} you</span>}
         {state.approvals.some((a) => a.status === 'pending') && <span className="cyan">◆ {state.approvals.filter((a) => a.status === 'pending').length} awaiting approval</span>}
         <span className="sp" />
         <button onClick={() => setCrt(!crt)} aria-pressed={crt} title="Toggle scanlines and glow">CRT {crt ? 'on' : 'off'}</button>
@@ -117,7 +118,7 @@ export function App() {
               {state.goals.filter((g) => g.project === p.name).map((g) => (
                 <button key={g.id} className="nav-item" aria-current={goal?.id === g.id}
                   onClick={() => { setGoalId(g.id); setBeadId(undefined); setTab('board'); }}>
-                  {g.title}{g.status === 'delivered' ? ' ⇡' : g.status === 'done' ? ' ✔' : ''}
+                  {g.title}{g.status === 'delivered' ? ' ⇡' : g.status === 'done' ? ' ✔' : g.status === 'planning' ? ' …' : g.status === 'plan_ready' ? ' ?' : g.paused ? ' ‖' : ''}
                 </button>
               ))}
             </div>
@@ -146,8 +147,10 @@ export function App() {
             <PrCard pr={state.prs.find((p) => p.goalId === goal.id)!} reviewing={state.reviewing.includes(goal.id)}
               onDone={() => void refresh()} setError={setError} />
           )}
-          {tab === 'board' && <Board goal={goal} beads={goalBeads} selected={bead?.id} onSelect={select} tag={identityTag} />}
-          {tab === 'inbox' && <RequestList requests={state.requests} projects={state.projects} onDone={() => void refresh()} setError={setError} />}
+          {tab === 'board' && <Board goal={goal} beads={goalBeads} selected={bead?.id} onSelect={select} tag={identityTag}
+            onTogglePause={goal ? () => { void api(`/api/goals/${goal.id}/${goal.paused ? 'resume' : 'pause'}`, {}).then(() => refresh()).catch((e: Error) => setError(e.message)); } : undefined} />}
+          {tab === 'inbox' && <Escalations escalations={state.escalations} goals={state.goals} onDone={() => void refresh()} setError={setError} />}
+          {tab === 'inbox' && <RequestList requests={state.requests} projects={state.projects} planning={state.planning} onDone={() => void refresh()} setError={setError} />}
           {tab === 'inbox' && <Inbox approvals={state.approvals} goals={state.goals} order={idOrder} onDone={() => void refresh()} setError={setError} />}
           {tab === 'log' && <Log events={state.events} />}
         </main>

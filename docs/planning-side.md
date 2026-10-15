@@ -131,6 +131,8 @@ The model proposes the size; code can override it. For example, a request that m
 
 ## 6. Milestones
 
+**Status:** P1, P2 and P3 are built (see roadmap). P4 and P5 remain. Differences from this spec as built: the plan record keeps `request_id`; `goals.paused` is a column; escalations are a table (`escalations`) shown in the inbox; model refinement of beads is not built; related-plan search runs on the request title because a Scout does not exist yet.
+
 ### P1. Architect and the plan gate (M)
 
 - `requests` table, `createRequest`, typed intake in UI and CLI (see [intake-sources.md](intake-sources.md) §2).

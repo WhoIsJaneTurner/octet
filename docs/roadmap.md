@@ -16,7 +16,7 @@ Effort sizes are rough: **S** is under half a day, **M** is one to two days, **L
 
 ## 1. What exists today
 
-Everything below is implemented, tested (75 unit and integration tests) and pushed to `WhoIsJaneTurner/octet`. Items marked "real run" were also exercised against Claude Code and, where noted, GitHub.
+Everything below is implemented, tested (113 unit and integration tests) and pushed to `WhoIsJaneTurner/octet`. Items marked "real run" were also exercised against Claude Code and, where noted, GitHub.
 
 | Area | State |
 |---|---|
@@ -31,6 +31,8 @@ Everything below is implemented, tested (75 unit and integration tests) and push
 | Recovery | Heartbeat table; orphaned `running` beads are failed by a periodic sweep, not only at start. Cancel (UI, API, CLI, Ctrl-C), run timeout, per-run log files |
 | Daemon | Loopback HTTP and SSE, per-session token, Host-header check, PR polling every 90 s |
 | Intake | `requests` table (dedup on source + external ref, 20,000-char body cap), UI form, `octet ask`, route and decline from the inbox, all audited. Planning does not read them yet |
+| Planning | Vault per project (plain files, atomic, locked, redacted, optional git with audit-head anchoring). Architect writes a validated JSON plan; plan gate in the inbox (approve, reject with feedback, edit); hash recorded in the audit chain and re-checked before beads are made; Marshal decomposition |
+| Scheduler | Durable-state loop in the daemon: runs, reviews, retries, escalations, run ceiling, pause, autonomy per project (`manual`, `plan-gated`, `auto-to-pr`). Only touches goals made from an approved plan |
 | UI | Green-screen React app: council, board, inbox, log, diff viewer, approvals |
 | CLI | `identity`, `project`, `goal`, `bead`, `approval`, `pr`, `audit`, `status` |
 
@@ -40,7 +42,9 @@ Everything below is implemented, tested (75 unit and integration tests) and push
 |---|---|
 | Engineer, Reviewer | Built |
 | Warden, Courier | Built (deterministic code, no model) |
-| Chair, Marshal, Architect, Scout | Persona prompt only. **No runtime.** This is the planning side. |
+| Architect | Built (read-only, structured output, one retry) |
+| Marshal | Built as code: decomposition and the scheduler. The optional model refinement pass is not built |
+| Chair, Scout | Personas written; Chair is a stub (`size = small`, no questions) and there is no Scout runtime yet. Step 9 |
 
 ---
 
@@ -52,10 +56,10 @@ Each step is shippable on its own and leaves the product working.
 |---|---|---|---|---|
 | 1 | ~~Cancel a running bead; persist engineer output; orphan detection~~ **Done** (session two; leftovers in hardening §3) | hardening §3 | M | Today you cannot stop an agent, and output vanishes on restart. Fix before more autonomy |
 | 2 | ~~Request model + typed intake in the UI and CLI~~ **Done** (session two; nothing consumes requests yet, the Architect in step 4 does) | intake §2 | S | Everything planning-side starts from a request |
-| 3 | Plan vault (file layout, writer, audit anchoring) | vault | M | Plans need somewhere to live before they are generated |
-| 4 | Architect + plan gate (milestone P1) | planning §6 | M | First time a typed request becomes a plan you approve |
-| 5 | Marshal decomposition + validation (P2) | planning §6 | M | Plan becomes beads |
-| 6 | Scheduler loop (P3) | planning §7 | L | The "describe it, approve the plan, come back to a PR" experience |
+| 3 | ~~Plan vault~~ **Done** | vault | M | Plans need somewhere to live before they are generated |
+| 4 | ~~Architect + plan gate (P1)~~ **Done** | planning §6 | M | First time a typed request becomes a plan you approve |
+| 5 | ~~Marshal decomposition + validation (P2)~~ **Done** (model refinement flag not built) | planning §6 | M | Plan becomes beads |
+| 6 | ~~Scheduler loop (P3)~~ **Done**, with autonomy levels | planning §7 | L | The "describe it, approve the plan, come back to a PR" experience |
 | 7 | Merge-conflict handling and stale-base rebasing | hardening §4 | M | Needed the moment two beads touch the same file |
 | 8 | GitHub issue intake | intake §3 | M | First external source; read-only |
 | 9 | Scout + Chair conversational intake (P4) | planning §6 | M | Better plans, fewer wrong guesses |

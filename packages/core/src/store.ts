@@ -1,10 +1,12 @@
-import { mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
 
 /** `delivered` = PR open and waiting on review; `done` = PR merged. Only `active` counts toward the goal cap. */
-export type GoalStatus = 'active' | 'delivered' | 'done' | 'failed';
+export type GoalStatus = 'planning' | 'plan_ready' | 'active' | 'delivered' | 'done' | 'failed';
+/** Statuses that hold one of the active-goal slots. */
+export const OPEN_GOAL_STATUSES: readonly GoalStatus[] = ['planning', 'plan_ready', 'active'];
 export type BeadStatus = 'todo' | 'running' | 'in_review' | 'changes_requested' | 'merged' | 'failed';
 
 export interface Goal {
@@ -14,6 +16,8 @@ export interface Goal {
   branch: string;
   worktree: string;
   status: GoalStatus;
+  /** The scheduler skips a paused goal. Pausing never cancels a running bead. */
+  paused: boolean;
   createdAt: string;
 }
 
@@ -26,12 +30,40 @@ export interface Bead {
   status: BeadStatus;
   branch: string;
   worktree: string;
+  /** The plan and the plan-local item this bead was created from, if any. */
+  planId: string | null;
+  planItem: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 export type ApprovalStatus = 'pending' | 'approved' | 'denied';
-export type ApprovalKind = 'deliver' | 'comment';
+export type ApprovalKind = 'deliver' | 'comment' | 'plan';
+
+export type PlanStatus = 'draft' | 'awaiting_approval' | 'approved' | 'rejected' | 'superseded';
+export interface PlanRecord {
+  id: string;
+  goalId: string;
+  requestId: string | null;
+  version: number;
+  status: PlanStatus;
+  /** Directory of this plan inside the vault, relative to the vault root. */
+  vaultPath: string;
+  /** SHA-256 of plan.vN.json as saved. */
+  contentHash: string;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export interface Escalation {
+  id: string;
+  goalId: string;
+  beadId: string | null;
+  reason: string;
+  message: string;
+  createdAt: string;
+  resolvedAt: string | null;
+}
 
 export interface Approval {
   id: string;
@@ -135,6 +167,18 @@ CREATE TABLE IF NOT EXISTS bead_runs (
   pid INTEGER NOT NULL, host TEXT NOT NULL, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL,
   ended_at TEXT, end_reason TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS plans (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, request_id TEXT, version INTEGER NOT NULL, status TEXT NOT NULL,
+  vault_path TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL, decided_at TEXT
+);
+CREATE TABLE IF NOT EXISTS scout_reports (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, vault_path TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS escalations (
+  id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, bead_id TEXT, reason TEXT NOT NULL, message TEXT NOT NULL,
+  created_at TEXT NOT NULL, resolved_at TEXT
+);
 CREATE TABLE IF NOT EXISTS requests (
   id TEXT PRIMARY KEY, source TEXT NOT NULL, external_ref TEXT, project TEXT, title TEXT NOT NULL,
   body TEXT NOT NULL, requester TEXT NOT NULL, status TEXT NOT NULL, reject_reason TEXT, goal_id TEXT,
@@ -147,6 +191,33 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 `;
 
+type Db = DatabaseSync;
+const hasColumn = (db: Db, table: string, col: string): boolean =>
+  (db.prepare(`PRAGMA table_info(${table})`).all() as Row[]).some((c) => c.name === col);
+const addColumn = (db: Db, table: string, col: string, decl: string): void => {
+  if (!hasColumn(db, table, col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${decl}`);
+};
+
+/**
+ * Ordered, idempotent schema migrations. Each runs once; the count is stored in `schema_version`.
+ * New tables live in SCHEMA (CREATE IF NOT EXISTS); migrations are for changes to existing tables.
+ * Append only: never edit or reorder an entry that has shipped.
+ */
+export const MIGRATIONS: ((db: Db) => void)[] = [
+  // 1: databases from before the audit chain existed
+  (db) => {
+    addColumn(db, 'events', 'prev_hash', "TEXT NOT NULL DEFAULT ''");
+    addColumn(db, 'events', 'hash', "TEXT NOT NULL DEFAULT ''");
+  },
+  // 2: beads trace back to the plan item that created them
+  (db) => {
+    addColumn(db, 'beads', 'plan_id', 'TEXT');
+    addColumn(db, 'beads', 'plan_item', 'TEXT');
+  },
+  // 3: a goal can be paused
+  (db) => addColumn(db, 'goals', 'paused', 'INTEGER NOT NULL DEFAULT 0'),
+];
+
 /** Events are chained: each hash covers the previous hash plus the event's own fields. */
 export function eventHash(prev: string, e: { ts: string; kind: string; goalId: string | null; beadId: string | null; seat: string | null; data: string }): string {
   return createHash('sha256').update(JSON.stringify([prev, e.ts, e.kind, e.goalId, e.beadId, e.seat, e.data])).digest('hex');
@@ -158,13 +229,23 @@ const now = (): string => new Date().toISOString();
 const toGoal = (r: Row): Goal => ({
   id: r.id as string, project: r.project as string, title: r.title as string,
   branch: r.branch as string, worktree: r.worktree as string, status: r.status as GoalStatus,
-  createdAt: r.created_at as string,
+  paused: r.paused === 1, createdAt: r.created_at as string,
 });
 const toBead = (r: Row): Bead => ({
   id: r.id as string, goalId: r.goal_id as string, title: r.title as string, brief: r.brief as string,
   dependsOn: JSON.parse(r.depends_on as string) as string[], status: r.status as BeadStatus,
   branch: r.branch as string, worktree: r.worktree as string,
+  planId: r.plan_id as string | null, planItem: r.plan_item as string | null,
   createdAt: r.created_at as string, updatedAt: r.updated_at as string,
+});
+const toPlan = (r: Row): PlanRecord => ({
+  id: r.id as string, goalId: r.goal_id as string, requestId: r.request_id as string | null, version: r.version as number,
+  status: r.status as PlanStatus, vaultPath: r.vault_path as string, contentHash: r.content_hash as string,
+  createdAt: r.created_at as string, decidedAt: r.decided_at as string | null,
+});
+const toEscalation = (r: Row): Escalation => ({
+  id: r.id as string, goalId: r.goal_id as string, beadId: r.bead_id as string | null, reason: r.reason as string,
+  message: r.message as string, createdAt: r.created_at as string, resolvedAt: r.resolved_at as string | null,
 });
 
 const toRun = (r: Row): BeadRun => ({
@@ -202,16 +283,38 @@ export class Store {
   private readonly listeners = new Set<() => void>();
 
   constructor(file: string) {
+    const existed = file !== ':memory:' && existsSync(file) && statSync(file).size > 0;
     if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
-    // Databases created before the audit chain existed lack these columns.
-    const cols = (this.db.prepare('PRAGMA table_info(events)').all() as Row[]).map((c) => c.name);
-    if (!cols.includes('hash')) {
-      this.db.exec("ALTER TABLE events ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''");
-      this.db.exec("ALTER TABLE events ADD COLUMN hash TEXT NOT NULL DEFAULT ''");
+    this.migrate(file, existed);
+  }
+
+  /** Runs pending migrations. An existing database is copied to `<file>.bak-v<N>` first; to restore, stop Octet and copy it back. */
+  private migrate(file: string, existed: boolean): void {
+    const row = this.db.prepare('SELECT version FROM schema_version').get() as Row | undefined;
+    // A database with no version row is either brand new or from before versioning; both start at 0 and the migrations are idempotent.
+    const current = Number(row?.version ?? 0);
+    if (current >= MIGRATIONS.length) return;
+    if (existed && current < MIGRATIONS.length) {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      copyFileSync(file, `${file}.bak-v${current}`);
     }
+    this.db.exec('BEGIN');
+    try {
+      for (let i = current; i < MIGRATIONS.length; i++) MIGRATIONS[i]!(this.db);
+      this.db.exec('DELETE FROM schema_version');
+      this.db.prepare('INSERT INTO schema_version VALUES (?)').run(MIGRATIONS.length);
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  schemaVersion(): number {
+    return Number((this.db.prepare('SELECT version FROM schema_version').get() as Row).version);
   }
 
   close(): void {
@@ -228,10 +331,10 @@ export class Store {
     for (const fn of this.listeners) fn();
   }
 
-  insertGoal(g: Omit<Goal, 'createdAt' | 'status'>): Goal {
-    const goal: Goal = { ...g, status: 'active', createdAt: now() };
+  insertGoal(g: Omit<Goal, 'createdAt' | 'status' | 'paused'> & { status?: GoalStatus }): Goal {
+    const goal: Goal = { ...g, status: g.status ?? 'active', paused: false, createdAt: now() };
     this.db
-      .prepare('INSERT INTO goals VALUES (?,?,?,?,?,?,?)')
+      .prepare('INSERT INTO goals (id, project, title, branch, worktree, status, created_at) VALUES (?,?,?,?,?,?,?)')
       .run(goal.id, goal.project, goal.title, goal.branch, goal.worktree, goal.status, goal.createdAt);
     this.changed();
     return goal;
@@ -251,13 +354,85 @@ export class Store {
     this.changed();
   }
 
-  insertBead(b: Omit<Bead, 'createdAt' | 'updatedAt' | 'status'>): Bead {
-    const t = now();
-    const bead: Bead = { ...b, status: 'todo', createdAt: t, updatedAt: t };
+  setGoalPaused(id: string, paused: boolean): void {
+    this.db.prepare('UPDATE goals SET paused = ? WHERE id = ?').run(paused ? 1 : 0, id);
+    this.changed();
+  }
+
+  insertPlan(p: { id?: string; goalId: string; requestId: string | null; version: number; status: PlanStatus; vaultPath: string; contentHash: string }): PlanRecord {
+    const plan: PlanRecord = { ...p, id: p.id ?? newId('plan'), createdAt: now(), decidedAt: null };
     this.db
-      .prepare('INSERT INTO beads VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .prepare('INSERT INTO plans VALUES (?,?,?,?,?,?,?,?,?)')
+      .run(plan.id, plan.goalId, plan.requestId, plan.version, plan.status, plan.vaultPath, plan.contentHash, plan.createdAt, null);
+    this.changed();
+    return plan;
+  }
+
+  getPlan(id: string): PlanRecord | undefined {
+    const r = this.db.prepare('SELECT * FROM plans WHERE id = ?').get(id) as Row | undefined;
+    return r && toPlan(r);
+  }
+
+  listPlans(goalId?: string): PlanRecord[] {
+    const rows = goalId
+      ? (this.db.prepare('SELECT * FROM plans WHERE goal_id = ? ORDER BY version').all(goalId) as Row[])
+      : (this.db.prepare('SELECT * FROM plans ORDER BY created_at, version').all() as Row[]);
+    return rows.map(toPlan);
+  }
+
+  setPlanStatus(id: string, status: PlanStatus): void {
+    const decided = status === 'approved' || status === 'rejected' || status === 'superseded';
+    this.db.prepare('UPDATE plans SET status = ?, decided_at = COALESCE(?, decided_at) WHERE id = ?').run(status, decided ? now() : null, id);
+    this.changed();
+  }
+
+  insertScout(s: { goalId: string; vaultPath: string; contentHash: string }): string {
+    const id = newId('scout');
+    this.db.prepare('INSERT INTO scout_reports VALUES (?,?,?,?,?)').run(id, s.goalId, s.vaultPath, s.contentHash, now());
+    this.changed();
+    return id;
+  }
+
+  /** Opens an escalation unless an identical one is already open (the scheduler calls this every tick). */
+  escalate(e: { goalId: string; beadId?: string; reason: string; message: string }): Escalation | undefined {
+    const open = this.db
+      .prepare('SELECT 1 FROM escalations WHERE goal_id = ? AND COALESCE(bead_id, \'\') = ? AND reason = ? AND resolved_at IS NULL')
+      .get(e.goalId, e.beadId ?? '', e.reason);
+    if (open) return undefined;
+    const esc: Escalation = { id: newId('esc'), goalId: e.goalId, beadId: e.beadId ?? null, reason: e.reason, message: e.message, createdAt: now(), resolvedAt: null };
+    this.db
+      .prepare('INSERT INTO escalations VALUES (?,?,?,?,?,?,?)')
+      .run(esc.id, esc.goalId, esc.beadId, esc.reason, esc.message, esc.createdAt, null);
+    this.changed();
+    return esc;
+  }
+
+  listEscalations(openOnly = false): Escalation[] {
+    const rows = this.db.prepare(`SELECT * FROM escalations ${openOnly ? 'WHERE resolved_at IS NULL' : ''} ORDER BY created_at DESC, rowid DESC`).all() as Row[];
+    return rows.map(toEscalation);
+  }
+
+  resolveEscalation(id: string): boolean {
+    const res = this.db.prepare('UPDATE escalations SET resolved_at = ? WHERE id = ? AND resolved_at IS NULL').run(now(), id);
+    this.changed();
+    return Number(res.changes) === 1;
+  }
+
+  /** Closes open escalations for a bead (or a whole goal) once the situation has changed. */
+  resolveEscalationsFor(goalId: string, beadId?: string): void {
+    if (beadId) this.db.prepare('UPDATE escalations SET resolved_at = ? WHERE goal_id = ? AND bead_id = ? AND resolved_at IS NULL').run(now(), goalId, beadId);
+    else this.db.prepare('UPDATE escalations SET resolved_at = ? WHERE goal_id = ? AND resolved_at IS NULL').run(now(), goalId);
+    this.changed();
+  }
+
+  insertBead(b: Omit<Bead, 'createdAt' | 'updatedAt' | 'status' | 'planId' | 'planItem'> & { planId?: string; planItem?: string }): Bead {
+    const t = now();
+    const bead: Bead = { ...b, planId: b.planId ?? null, planItem: b.planItem ?? null, status: 'todo', createdAt: t, updatedAt: t };
+    this.db
+      .prepare(`INSERT INTO beads (id, goal_id, title, brief, depends_on, status, branch, worktree, created_at, updated_at, plan_id, plan_item)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(bead.id, bead.goalId, bead.title, bead.brief, JSON.stringify(bead.dependsOn), bead.status,
-        bead.branch, bead.worktree, bead.createdAt, bead.updatedAt);
+        bead.branch, bead.worktree, bead.createdAt, bead.updatedAt, bead.planId, bead.planItem);
     this.changed();
     return bead;
   }
@@ -269,8 +444,8 @@ export class Store {
 
   listBeads(goalId?: string): Bead[] {
     const rows = goalId
-      ? (this.db.prepare('SELECT * FROM beads WHERE goal_id = ? ORDER BY created_at').all(goalId) as Row[])
-      : (this.db.prepare('SELECT * FROM beads ORDER BY created_at').all() as Row[]);
+      ? (this.db.prepare('SELECT * FROM beads WHERE goal_id = ? ORDER BY created_at, rowid').all(goalId) as Row[])
+      : (this.db.prepare('SELECT * FROM beads ORDER BY created_at, rowid').all() as Row[]);
     return rows.map(toBead);
   }
 
@@ -348,6 +523,14 @@ export class Store {
   /** Runs that have not ended, whether or not their owner is still alive. */
   openRuns(): BeadRun[] {
     return (this.db.prepare('SELECT * FROM bead_runs WHERE ended_at IS NULL ORDER BY id').all() as Row[]).map(toRun);
+  }
+
+  /** Engineer runs started for all beads of a goal (the scheduler's cost ceiling counts these). */
+  countRunsForGoal(goalId: string): number {
+    const r = this.db
+      .prepare('SELECT COUNT(*) AS n FROM bead_runs WHERE bead_id IN (SELECT id FROM beads WHERE goal_id = ?)')
+      .get(goalId) as Row;
+    return Number(r.n);
   }
 
   /** Latest run for a bead, if any. */

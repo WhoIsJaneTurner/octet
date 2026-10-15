@@ -4,8 +4,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import {
-  addBead, addProject, approveBead, beadDiff, cancelBead, createGoal, decideApproval, loadIdentities, loadLimits, loadProjects,
-  loadReview, OctetError, readRunOutput, reconcileRunning, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestChanges, requestDelivery, requestPrecomment, reviewBead, runBead, SEATS, type AgentRunner, type Ctx, type Forge, type Store,
+  addBead, addProject, approveBead, beadDiff, cancelBead, createGoal, decideApproval, editPlan, getProject, loadIdentities, loadLimits, loadPlanning, loadProjects,
+  loadReview, openVault, planRequest, rejectPlan, tick, verifyPlans, OctetError, readRunOutput, reconcileRunning, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestChanges, requestDelivery, requestPrecomment, reviewBead, runBead, SEATS, type AgentRunner, type Ctx, type Forge, type Limits, type Store,
 } from '@octet/core';
 
 export interface DaemonOptions {
@@ -20,6 +20,10 @@ export interface DaemonOptions {
   projectsFile?: string;
   /** Where run logs are kept. Defaults to the data directory. */
   runsDir?: string;
+  /** Run the scheduler loop. On by default; it only touches goals created from an approved plan. */
+  scheduler?: boolean;
+  /** Overrides the limits read from config.toml (tests use this for determinism). */
+  limits?: Limits;
 }
 
 export interface Daemon {
@@ -80,7 +84,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
   const recovered = reconcileRunning(store);
   if (recovered.length) console.warn(`octet: recovered ${recovered.length} interrupted bead(s): ${recovered.join(', ')}`);
   const ctx: Ctx = {
-    store, runner, runsDir: opts.runsDir ?? runsDir(), ...(opts.forge ? { forge: opts.forge } : {}), limits: loadLimits(), review: loadReview(),
+    store, runner, runsDir: opts.runsDir ?? runsDir(), ...(opts.forge ? { forge: opts.forge } : {}), limits: opts.limits ?? loadLimits(), review: loadReview(), planning: loadPlanning(),
     identities: loadIdentities(opts.identitiesFile),
     projects: loadProjects(opts.projectsFile),
   };
@@ -88,6 +92,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
   const clients = new Set<ServerResponse>();
   const running = new Set<string>();
   const reviewing = new Set<string>();
+  const planning = new Set<string>();
 
   const push = (event: string, data: unknown) => {
     const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -101,10 +106,14 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     projects: ctx.projects,
     goals: store.listGoals(),
     requests: store.listRequests(),
+    plans: store.listPlans(),
+    escalations: store.listEscalations(true),
+    planning: [...planning],
     approvals: store.listApprovals(),
     prs: store.listPrs(),
     limits: ctx.limits,
     audit: store.verifyChain(),
+    planAudit: verifyPlans(ctx),
     beads: store.listBeads(),
     events: store.events(200),
     // Runs owned by other processes (the CLI) count too, so the cap and the UI see them.
@@ -191,6 +200,54 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
       const b = await readJson(req);
       return json(200, m[2] === 'route' ? routeRequest(ctx, m[1]!, str(b, 'project')) : rejectRequest(ctx, m[1]!, str(b, 'reason')));
     }
+    if ((m = path.match(/^\/api\/requests\/([\w-]+)\/plan$/)) && method === 'POST') {
+      const id = m[1]!;
+      const r = store.getRequest(id);
+      if (!r) throw new HttpError(404, `Unknown request "${id}"`);
+      if (r.status !== 'routed' && r.status !== 'planning') throw new HttpError(400, `Request ${id} is ${r.status}; only a routed request can be planned`);
+      if (planning.has(id)) throw new HttpError(409, 'Planning is already running for this request');
+      const project = ctx.projects.find((p) => p.name === r.project);
+      if (!project?.vault) throw new HttpError(400, `Project "${r.project}" has no vault, so planning is off for it`);
+      planning.add(id);
+      push('change', {});
+      void planRequest(ctx, id)
+        .catch(() => { /* logged as planning.failed and escalated */ })
+        .finally(() => { planning.delete(id); push('change', {}); });
+      return json(202, { planning: id });
+    }
+    if ((m = path.match(/^\/api\/plans\/([\w-]+)$/)) && method === 'GET') {
+      const rec = store.getPlan(m[1]!);
+      if (!rec) throw new HttpError(404, `Unknown plan "${m[1]}"`);
+      const goal = store.getGoal(rec.goalId)!;
+      const vault = openVault(getProject(ctx.projects, goal.project), ctx.identities.find((i) => i.id === getProject(ctx.projects, goal.project).identity)!);
+      return json(200, { record: rec, plan: vault.readPlan(rec.vaultPath.replace(/^plans\//, ''), rec.version).plan });
+    }
+    if ((m = path.match(/^\/api\/plans\/([\w-]+)\/(reject|edit)$/)) && method === 'POST') {
+      const id = m[1]!;
+      const rec = store.getPlan(id);
+      if (!rec) throw new HttpError(404, `Unknown plan "${id}"`);
+      const b = await readJson(req);
+      if (m[2] === 'edit') return json(201, editPlan(ctx, id, b.plan));
+      const feedback = str(b, 'feedback');
+      if (rec.status !== 'awaiting_approval') throw new HttpError(400, `Plan ${id} is ${rec.status}, not awaiting approval`);
+      const reqId = rec.requestId ?? '';
+      planning.add(reqId);
+      push('change', {});
+      void rejectPlan(ctx, id, feedback)
+        .catch(() => { /* logged as planning.failed and escalated */ })
+        .finally(() => { planning.delete(reqId); push('change', {}); });
+      return json(202, { replanning: id });
+    }
+    if ((m = path.match(/^\/api\/goals\/([\w-]+)\/(pause|resume)$/)) && method === 'POST') {
+      if (!store.getGoal(m[1]!)) throw new HttpError(404, `Unknown goal "${m[1]}"`);
+      store.setGoalPaused(m[1]!, m[2] === 'pause');
+      store.log({ kind: m[2] === 'pause' ? 'goal.paused' : 'goal.resumed', goalId: m[1]! });
+      return json(200, store.getGoal(m[1]!));
+    }
+    if ((m = path.match(/^\/api\/escalations\/([\w-]+)\/resolve$/)) && method === 'POST') {
+      if (!store.resolveEscalation(m[1]!)) throw new HttpError(404, 'No such open escalation');
+      return json(200, { resolved: m[1] });
+    }
     if (path === '/api/goals' && method === 'POST') {
       const b = await readJson(req);
       return json(201, createGoal(ctx, { project: str(b, 'project'), title: str(b, 'title') }));
@@ -221,7 +278,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
       refreshAllPrs(ctx);
       return json(200, { prs: store.listPrs() });
     }
-    if (path === '/api/audit/verify' && method === 'GET') return json(200, store.verifyChain());
+    if (path === '/api/audit/verify' && method === 'GET') return json(200, { ...store.verifyChain(), plans: verifyPlans(ctx) });
     if ((m = path.match(/^\/api\/beads\/([\w-]+)\/(run|cancel|approve|changes|diff|output|review)$/))) {
       const [, id, action] = m as unknown as [string, string, string];
       if (action === 'diff' && method === 'GET') return json(200, { diff: beadDiff(ctx, id) });
@@ -277,6 +334,35 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     res.end(body);
   }
 
+
+  // The scheduler: reads durable state on every change and every 30 s, and starts work through the same
+  // functions the buttons use, so it respects the running sets and the caps.
+  let ticking = false;
+  let pending: NodeJS.Timeout | undefined;
+  const runTick = () => {
+    if (ticking || opts.scheduler === false) return;
+    ticking = true;
+    try {
+      tick(ctx, { isRunning: (id) => running.has(id), isReviewing: (id) => reviewing.has(id) }, {
+        run: (id) => startRun(id),
+        review: (id) => startReview(id),
+      });
+    } catch (e) {
+      console.error('octet: scheduler tick failed', e);
+    } finally {
+      ticking = false;
+    }
+  };
+  const tickSoon = () => {
+    if (pending || opts.scheduler === false) return;
+    pending = setTimeout(() => { pending = undefined; runTick(); }, 100);
+    pending.unref();
+  };
+  store.subscribe(tickSoon);
+  const beat = setInterval(runTick, 30_000);
+  beat.unref();
+  runTick();
+
   // Read-only PR status polling, so a locked repo's "waiting on review" state stays current.
   const poll = setInterval(() => { try { refreshAllPrs(ctx); } catch { /* logged per PR */ } }, 90_000);
   poll.unref();
@@ -324,6 +410,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     close: () => new Promise((resolve) => {
       clearInterval(poll);
       clearInterval(sweep);
+      clearInterval(beat);
+      clearTimeout(pending);
       for (const c of clients) c.end();
       server.close(() => resolve());
       server.closeAllConnections();
