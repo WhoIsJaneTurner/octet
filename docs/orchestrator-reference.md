@@ -250,8 +250,8 @@ What Octet already satisfies and what it does not yet. This is the honest status
 | Locked repos and two-person review | Implemented: after delivery the goal is `delivered` and the PR's review decision and checks are tracked read-only. A required human review shows as waiting. An optional automated pre-review comment is posted only after approval, labeled as not an approval. Reviewing a teammate's PR is local and posts nothing. There is deliberately no path for Octet or one of the user's own accounts to satisfy a required review |
 | Concurrency caps | Implemented: engineers (default 3) and active goals (default 3), configurable in `config.toml`. Effort scaling is not |
 | AGENTS.md | Implemented: the repo's AGENTS.md is passed to builders as data, capped at 8,000 characters |
-| OpenTelemetry traces | **Not implemented** |
-| MCP / ACP / A2A | **Not implemented**; one adapter only. Builders run with MCP disabled |
+| OpenTelemetry traces | Implemented (roadmap 13): `invoke_agent` / `execute_tool` spans over OTLP/HTTP JSON, only when an endpoint is configured, content capture off. See hardening §2.4 |
+| MCP / ACP / A2A | ACP client adapter and per-seat MCP allow-lists implemented (hardening §2.4), exercised only against fakes and one captured Claude Code run. A2A not started. Builders still run with MCP disabled unless the seat is allow-listed |
 | Builder sandboxing beyond a denied-tools list | **Not implemented** (agents run with `acceptEdits`) |
 | Architect, Scout, Reviewer, Marshal, Chair agents | Persona prompts exist; **no runtime**. The Courier is deterministic code, not a model |
 
