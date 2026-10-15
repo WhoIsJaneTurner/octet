@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import {
   addBead, addProject, approveBead, cancelBead, ClaudeCodeRunner, createGoal, dbFile, decideApproval, editPlan, FakeRunner, getIdentity,
-  ghToken, loadIdentities, loadLimits, loadProjects, loadPlanning, loadReview, OctetError, openVault, planRequest, rejectPlan, rejectRequest, renderPlan, updateProject, verifyPlans, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
+  ghToken, loadIdentities, loadLimits, loadProjects, loadGithubHosts, loadPlanning, loadReview, setGithubHosts, OctetError, openVault, planRequest, rejectPlan, rejectRequest, renderPlan, updateProject, verifyPlans, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
 } from '@octet/core';
 
 const USAGE = `octet <command>
@@ -44,6 +44,7 @@ const USAGE = `octet <command>
 There is no default identity: every project must name one.`;
 
 function makeCtx(fake: boolean): Ctx {
+  setGithubHosts(loadGithubHosts());
   return {
     store: new Store(dbFile()),
     identities: loadIdentities(),
@@ -275,7 +276,8 @@ async function main(argv: string[]): Promise<void> {
     if (cmd === 'approve') {
       const [id] = rest;
       if (!id) throw new OctetError('usage: bead approve <bead>');
-      return void console.log(`bead ${approveBead(makeCtx(true), id).id}: merged`);
+      const b = approveBead(makeCtx(true), id);
+      return void console.log(`bead ${b.id}: ${b.status}${b.status === 'conflict' ? ' (it conflicts with the goal branch; run it again to have the engineer resolve it)' : ''}`);
     }
   }
 

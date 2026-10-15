@@ -18,3 +18,4 @@ export * from './plan.ts';
 export * from './vault.ts';
 export * from './planning.ts';
 export * from './scheduler.ts';
+export * from './goalreview.ts';

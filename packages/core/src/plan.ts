@@ -13,6 +13,8 @@ export interface PlanBead {
   outOfScope: string[];
   dependsOn: string[];
   size: BeadSize;
+  /** Why this bead may edit a file another unordered bead also edits. Without it, shared files are an error. */
+  sharedFilesNote?: string;
 }
 
 export interface Plan {
@@ -124,9 +126,11 @@ export function validatePlan(raw: unknown, limits: PlanLimits = DEFAULT_PLAN_LIM
       const size = typeof b.size === 'string' ? b.size : '';
       if (size === 'l' || size === 'xl') errors.push(`${at} (${id || title}) is sized "${size}"; split it into beads no larger than "m"`);
       else if (!SIZES.includes(size)) errors.push(`${at}.size must be one of xs, s, m`);
+      const note = pick(b, 'shared_files_note', 'sharedFilesNote');
       beads.push({
         id, title, objective, files: files ?? [], acceptance: acceptance ?? [], outOfScope: oos ?? [],
         dependsOn: deps ?? [], size: (SIZES.includes(size) ? size : 'm') as BeadSize,
+        ...(typeof note === 'string' && note.trim() ? { sharedFilesNote: note.trim() } : {}),
       });
     });
 
@@ -153,13 +157,16 @@ export function validatePlan(raw: unknown, limits: PlanLimits = DEFAULT_PLAN_LIM
     const points = beads.reduce((n, b) => n + SIZE_POINTS[b.size], 0);
     if (points > limits.maxPoints) errors.push(`Total size is ${points} points; the ceiling is ${limits.maxPoints}. Cut scope or split into separate goals`);
 
-    // Two beads on the same file with no ordering between them will conflict at merge time.
+    // Two beads on the same file with no ordering between them will conflict at merge time. That is an error unless
+    // one of them says why it is fine (then it is shown at the gate as a warning).
     for (let i = 0; i < beads.length; i++) {
       for (let j = i + 1; j < beads.length; j++) {
         const a = beads[i]!, b = beads[j]!;
         const shared = a.files.filter((f) => b.files.includes(f));
         if (shared.length && !reaches(beads, a.id, b.id) && !reaches(beads, b.id, a.id)) {
-          warnings.push(`Conflict risk: "${a.id}" and "${b.id}" both touch ${shared.join(', ')} with no dependency between them`);
+          const note = a.sharedFilesNote ?? b.sharedFilesNote;
+          if (note) warnings.push(`Conflict risk, justified: "${a.id}" and "${b.id}" both touch ${shared.join(', ')} (${note})`);
+          else errors.push(`Beads "${a.id}" and "${b.id}" both edit ${shared.join(', ')} with no dependency between them; add depends_on so one follows the other, or give one a "shared_files_note" explaining why they can run in parallel`);
         }
       }
     }
@@ -253,6 +260,7 @@ export function renderPlan(plan: Plan, title: string): string {
       b.dependsOn.length ? `After: ${b.dependsOn.join(', ')}` : 'No dependencies',
       '', b.objective,
       ...(b.files.length ? ['', 'Files: ' + b.files.map((f) => `\`${f}\``).join(', ')] : []),
+      ...(b.sharedFilesNote ? ['', `Shared files: ${b.sharedFilesNote}`] : []),
       '', 'Acceptance:', bullets(b.acceptance),
       ...(b.outOfScope.length ? ['', 'Out of scope:', bullets(b.outOfScope)] : []),
     ]), '',

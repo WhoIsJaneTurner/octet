@@ -19,6 +19,8 @@ export interface ReviewConfig {
   autoMerge: boolean;
   /** After this many "changes requested" verdicts on one bead, stop looping and ask the human. */
   maxRounds: number;
+  /** Before delivery, the Reviewer reads the whole goal diff and can send work back. Applies to scheduler-managed goals. */
+  goalReview?: boolean;
 }
 
 export const DEFAULT_REVIEW: ReviewConfig = { auto: false, autoMerge: false, maxRounds: 2 };
@@ -35,6 +37,7 @@ export function loadReview(file: string = join(octetHome(), 'config.toml')): Rev
     auto: r.auto === true,
     autoMerge: r.auto_merge === true,
     maxRounds: positive(r.max_rounds, DEFAULT_REVIEW.maxRounds),
+    goalReview: r.goal_review !== false,
   };
 }
 
@@ -75,4 +78,11 @@ export function loadPlanning(file: string = join(octetHome(), 'config.toml')): P
     maxRetries: typeof t.max_retries === 'number' && Number.isInteger(t.max_retries) && t.max_retries >= 0 ? t.max_retries : DEFAULT_PLANNING.maxRetries,
     capWaitMinutes: positive(t.cap_wait_minutes, DEFAULT_PLANNING.capWaitMinutes),
   };
+}
+
+/** Reads `[github] hosts` (GitHub Enterprise hostnames) from config.toml. */
+export function loadGithubHosts(file: string = join(octetHome(), 'config.toml')): string[] {
+  if (!existsSync(file)) return [];
+  const g = (parse(readFileSync(file, 'utf8')) as { github?: { hosts?: unknown } }).github;
+  return Array.isArray(g?.hosts) ? g.hosts.filter((h): h is string => typeof h === 'string') : [];
 }

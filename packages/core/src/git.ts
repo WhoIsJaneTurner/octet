@@ -18,12 +18,25 @@ export function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'item';
 }
 
-export function defaultBranch(repo: string, env: Env): string {
+/**
+ * The branch work is based on and PRs target. Never guesses silently: origin/HEAD first, then a lone `main` or
+ * `master`, then a repo with a single local branch, then the remote itself; ambiguity is an error that names the fix.
+ */
+export function defaultBranch(repo: string, env: Env, configured?: string): string {
+  if (configured) return configured;
   try {
     return git(repo, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], env).replace(/^origin\//, '');
-  } catch {
-    return git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'], env);
-  }
+  } catch { /* no local record of the remote's default */ }
+  const locals = git(repo, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/'], env).split('\n').filter((b) => b && !b.startsWith('octet/') && !b.startsWith('feat/'));
+  const common = locals.filter((b) => b === 'main' || b === 'master');
+  if (common.length === 1) return common[0]!;
+  if (!common.length && locals.length === 1) return locals[0]!;
+  try {
+    const out = execFileSync('git', ['ls-remote', '--symref', 'origin', 'HEAD'], { cwd: repo, env, encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const m = out.match(/^ref: refs\/heads\/(\S+)\s+HEAD/m);
+    if (m) return m[1]!;
+  } catch { /* offline or unauthenticated */ }
+  throw new OctetError(`Cannot tell which branch is the default in ${repo} (candidates: ${locals.join(', ') || 'none'}). Set default_branch for the project in projects.toml.`);
 }
 
 export function remoteUrl(repo: string, env: Env): string | null {
@@ -80,4 +93,46 @@ export function mergeBranch(wt: string, branch: string, message: string, env: En
 
 export function commitsAhead(wt: string, base: string, env: Env): number {
   return Number(git(wt, ['rev-list', '--count', `${base}..HEAD`], env));
+}
+
+/** Files with unresolved merge conflicts in a worktree. */
+export function unmergedFiles(wt: string, env: Env): string[] {
+  return git(wt, ['diff', '--name-only', '--diff-filter=U'], env).split('\n').filter(Boolean);
+}
+
+export function isMerging(wt: string, env: Env): boolean {
+  try { git(wt, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], env); return true; } catch { return false; }
+}
+
+export function abortMerge(wt: string, env: Env): void {
+  if (isMerging(wt, env)) git(wt, ['merge', '--abort'], env);
+}
+
+export type MergeAttempt = { ok: true } | { ok: false; files: string[] };
+
+/**
+ * Merges `branch` into the worktree's branch. A conflict is a normal outcome, not an exception: the files are
+ * reported and the worktree is left in the conflicted state for the caller to abort or hand to an engineer.
+ */
+export function tryMerge(wt: string, branch: string, message: string, env: Env): MergeAttempt {
+  try {
+    mergeBranch(wt, branch, message, env);
+    return { ok: true };
+  } catch (e) {
+    const files = unmergedFiles(wt, env);
+    if (!files.length) throw e; // a failure that is not a conflict
+    return { ok: false, files };
+  }
+}
+
+/** Commits on `base` that this worktree's branch does not have yet. */
+export function commitsBehind(wt: string, base: string, env: Env): number {
+  return Number(git(wt, ['rev-list', '--count', `HEAD..${base}`], env));
+}
+
+/** Do any of these files still contain conflict markers? */
+export function hasConflictMarkers(wt: string, files: string[]): boolean {
+  return files.some((f) => {
+    try { return /^(<<<<<<< |>>>>>>> |=======$)/m.test(readFileSync(join(wt, f), 'utf8')); } catch { return false; }
+  });
 }

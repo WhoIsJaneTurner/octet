@@ -8,6 +8,7 @@ export type SchedAction =
   | { type: 'run'; beadId: string }
   | { type: 'review'; beadId: string }
   | { type: 'merge'; beadId: string }
+  | { type: 'goal_review'; goalId: string }
   | { type: 'deliver'; goalId: string }
   | { type: 'escalate'; goalId: string; beadId?: string; reason: string; message: string };
 
@@ -20,7 +21,7 @@ export interface SchedHooks {
 /** Bead-scoped escalations clear themselves once the bead leaves the state that caused them. */
 const CLEARS_WHEN_NOT: Record<string, Bead['status'][]> = {
   bead_failed: ['failed'], cancelled: ['failed'], review_inconclusive: ['in_review'], review_rounds: ['in_review'],
-  review_error: ['in_review'], action_failed: ['todo', 'changes_requested', 'failed', 'in_review'], cap_wait: ['todo', 'changes_requested', 'failed'], merge_conflict: ['in_review'],
+  review_error: ['in_review'], action_failed: ['todo', 'changes_requested', 'failed', 'in_review', 'conflict'], cap_wait: ['todo', 'changes_requested', 'failed', 'conflict'], merge_conflict: ['conflict'], review_truncated: ['in_review'],
 };
 
 const eventId = (ctx: Ctx, kind: string, beadId: string): number => ctx.store.lastEvent(kind, beadId)?.id ?? 0;
@@ -62,6 +63,13 @@ export function decide(ctx: Ctx, hooks: SchedHooks, now = Date.now()): SchedActi
         if (depsMerged) { queue.push({ bead: b, goal }); progressing = true; }
         continue;
       }
+      if (b.status === 'conflict') {
+        // One attempt by the engineer to resolve it; after that it is yours.
+        const tried = ctx.store.countEvents('bead.conflict_resolve_started', b.id);
+        if (tried < 1) { queue.push({ bead: b, goal }); progressing = true; }
+        else { escalate('merge_conflict', `"${b.title}" still conflicts with the goal branch after one attempt to resolve it.`, b); waitingOnHuman = true; }
+        continue;
+      }
       if (b.status === 'failed') {
         const cancelled = eventId(ctx, 'bead.cancelled', b.id) > eventId(ctx, 'bead.started', b.id);
         const attempts = ctx.store.countEvents('bead.failed', b.id) + ctx.store.countEvents('bead.recovered', b.id);
@@ -91,7 +99,11 @@ export function decide(ctx: Ctx, hooks: SchedHooks, now = Date.now()): SchedActi
           escalate('review_inconclusive', `The Reviewer could not decide on "${b.title}".`, b);
           waitingOnHuman = true;
         } else if (v === 'approve') {
-          if (level === 'auto-to-pr') { actions.push({ type: 'merge', beadId: b.id }); progressing = true; }
+          if ((verdict.data as { truncated?: boolean }).truncated) {
+            // The review only saw part of the diff, so it cannot drive an automatic merge.
+            escalate('review_truncated', `"${b.title}" has a diff too large to review in full, so it will not merge automatically. Read it and merge it yourself.`, b);
+            waitingOnHuman = true;
+          } else if (level === 'auto-to-pr') { actions.push({ type: 'merge', beadId: b.id }); progressing = true; }
           else waitingOnHuman = true; // plan-gated: you merge each bead
         } else waitingOnHuman = true;
       }
@@ -101,7 +113,23 @@ export function decide(ctx: Ctx, hooks: SchedHooks, now = Date.now()): SchedActi
     if (beads.length && !unmerged.length) {
       const hasDelivery = ctx.store.listApprovals().some((a) => a.kind === 'deliver' && a.goalId === goal.id);
       const blocked = ctx.store.listEscalations(true).some((e) => e.goalId === goal.id && e.reason === 'deliver_failed');
-      if (!hasDelivery && !blocked && !ctx.store.getPr(goal.id)) actions.push({ type: 'deliver', goalId: goal.id });
+      if (!hasDelivery && !blocked && !ctx.store.getPr(goal.id)) {
+        if (review.goalReview === false) actions.push({ type: 'deliver', goalId: goal.id });
+        else {
+          // Delivery waits for the Reviewer's pass over the combined change, made after the latest merge.
+          const verdict = ctx.store.lastGoalEvent('goal.review.verdict', goal.id);
+          const lastMerge = ctx.store.lastGoalEvent('bead.merged', goal.id);
+          const current = !!verdict && (!lastMerge || verdict.id > lastMerge.id);
+          if (hooks.isReviewing(goal.id)) progressing = true;
+          else if (!current) actions.push({ type: 'goal_review', goalId: goal.id });
+          else {
+            const d = verdict.data as { verdict: string; truncated?: boolean };
+            if (d.verdict === 'approve' && !d.truncated) actions.push({ type: 'deliver', goalId: goal.id });
+            else if (d.verdict === 'changes_requested') escalate('goal_review_rounds', 'The final review sent the goal back as many times as allowed and is still not satisfied.');
+            else escalate('goal_review_inconclusive', d.truncated ? 'The combined diff is too large for the Reviewer to read in full. Review it yourself, then deliver.' : 'The final review could not decide.');
+          }
+        }
+      }
     } else if (unmerged.length && !progressing && !waitingOnHuman && !ctx.store.listEscalations(true).some((e) => e.goalId === goal.id)) {
       escalate('idle', 'Nothing can run: the remaining beads are blocked and nothing is waiting on a person.');
     }
@@ -134,6 +162,8 @@ function managed(ctx: Ctx, g: Goal): boolean {
 export interface TickExec {
   run(beadId: string): void;
   review(beadId: string): void;
+  /** The Reviewer's pass over a finished goal; the daemon tracks it in the same `reviewing` set under the goal id. */
+  goalReview(goalId: string): void;
 }
 
 /** Closes escalations whose cause is gone. */
@@ -156,6 +186,7 @@ export function tick(ctx: Ctx, hooks: SchedHooks, exec: TickExec): SchedAction[]
     try {
       if (a.type === 'run') exec.run(a.beadId);
       else if (a.type === 'review') exec.review(a.beadId);
+      else if (a.type === 'goal_review') exec.goalReview(a.goalId);
       else if (a.type === 'merge') approveBead(ctx, a.beadId);
       else if (a.type === 'deliver') {
         requestDelivery(ctx, a.goalId);
@@ -172,7 +203,7 @@ export function tick(ctx: Ctx, hooks: SchedHooks, exec: TickExec): SchedAction[]
       const goalId = 'goalId' in a ? a.goalId : ctx.store.getBead(a.beadId)?.goalId;
       if (!goalId) continue;
       const beadId = 'beadId' in a ? a.beadId : undefined;
-      const reason = a.type === 'merge' ? 'merge_conflict' : a.type === 'deliver' ? 'deliver_failed' : 'action_failed';
+      const reason = a.type === 'deliver' ? 'deliver_failed' : a.type === 'goal_review' ? 'goal_review_failed' : 'action_failed';
       const esc = ctx.store.escalate({ goalId, ...(beadId ? { beadId } : {}), reason, message: `${a.type} failed: ${message}` });
       if (esc) ctx.store.log({ kind: 'goal.escalated', goalId, ...(beadId ? { beadId } : {}), seat: 'marshal', data: { reason, message } });
     }

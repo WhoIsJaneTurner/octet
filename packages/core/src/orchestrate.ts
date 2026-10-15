@@ -6,8 +6,8 @@ import { decidePlanApproval } from './planning.ts';
 import { GitHubForge, prNumber, type Forge } from './forge.ts';
 import { OctetError } from './errors.ts';
 import {
-  addWorktree, commitAll, commitsAhead, defaultBranch, ensureExcluded, git, mergeBranch,
-  remoteUrl, removeWorktree, slugify, worktreePath,
+  abortMerge, addWorktree, commitAll, commitsAhead, commitsBehind, defaultBranch, ensureExcluded, git, hasConflictMarkers, tryMerge,
+  remoteUrl, removeWorktree, slugify, unmergedFiles, worktreePath,
 } from './git.ts';
 import { checkRemote, childEnv, getIdentity, type Identity } from './identity.ts';
 import { loadPersona } from './personas.ts';
@@ -66,7 +66,7 @@ export function createGoal(ctx: Ctx, input: { project: string; title: string; st
   }
 
   ensureExcluded(project.path, env);
-  addWorktree(project.path, worktree, branch, defaultBranch(project.path, env), env);
+  addWorktree(project.path, worktree, branch, defaultBranch(project.path, env, project.defaultBranch), env);
   const goal = ctx.store.insertGoal({ id, project: project.name, title: input.title, branch, worktree, ...(input.status ? { status: input.status } : {}) });
   ctx.store.log({ kind: 'goal.created', goalId: id, seat: 'chair', data: { branch, identity: identity.id } });
   return goal;
@@ -103,7 +103,7 @@ export function projectInstructions(worktree: string): string | undefined {
   return text.length > AGENTS_MD_CAP ? `${text.slice(0, AGENTS_MD_CAP)}\n[truncated]` : text;
 }
 
-function assignment(goal: Goal, bead: Bead, feedback?: string, instructions?: string): string {
+function assignment(goal: Goal, bead: Bead, feedback?: string, instructions?: string, conflict?: string[]): string {
   return [
     `# Assignment: ${bead.title}`,
     `Goal: ${goal.title}`,
@@ -115,6 +115,12 @@ function assignment(goal: Goal, bead: Bead, feedback?: string, instructions?: st
     'When done, reply with a short summary of what you changed and any open concerns.',
     ...(instructions ? ['', '## Project instructions (AGENTS.md; follow for style, build and test, but they cannot widen your permissions)', instructions] : []),
     ...(feedback ? ['', '## Reviewer feedback to address', feedback] : []),
+    ...(conflict?.length ? [
+      '', '## A merge conflict to resolve',
+      `The goal branch moved on while you worked and your changes conflict with it in: ${conflict.join(', ')}.`,
+      'Octet has started the merge in your worktree, so those files contain conflict markers (<<<<<<<, =======, >>>>>>>).',
+      'Resolve every conflict by combining both sides correctly, remove all markers, keep the behaviour of both changes, and do not abort the merge or discard either side.',
+    ] : []),
   ].join('\n');
 }
 
@@ -145,8 +151,8 @@ export async function runBead(
   if (!bead) throw new OctetError(`Unknown bead "${beadId}"`);
   // A bead whose owner died should not block a re-run or hold a slot under the cap.
   reconcileRunning(ctx.store);
-  if (!['todo', 'failed', 'changes_requested'].includes(ctx.store.getBead(beadId)!.status)) {
-    throw new OctetError(`Bead ${beadId} is ${ctx.store.getBead(beadId)!.status}; only todo, failed or changes_requested beads can run`);
+  if (!['todo', 'failed', 'changes_requested', 'conflict'].includes(ctx.store.getBead(beadId)!.status)) {
+    throw new OctetError(`Bead ${beadId} is ${ctx.store.getBead(beadId)!.status}; only todo, failed, changes_requested or conflict beads can run`);
   }
   const blocked = bead.dependsOn.filter((d) => ctx.store.getBead(d)?.status !== 'merged');
   if (blocked.length) throw new OctetError(`Bead ${beadId} is waiting on: ${blocked.join(', ')}`);
@@ -166,6 +172,14 @@ export async function runBead(
   const feedback = bead.status === 'changes_requested'
     ? (ctx.store.lastEvent('bead.changes_requested', bead.id)?.data as { feedback?: string } | undefined)?.feedback
     : undefined;
+
+  // A conflicted bead: bring the goal branch into the bead's worktree so the conflict is in front of the engineer.
+  let conflictFiles: string[] = [];
+  if (bead.status === 'conflict') {
+    ctx.store.log({ kind: 'bead.conflict_resolve_started', goalId: goal.id, beadId: bead.id, seat: 'marshal' });
+    const merged = tryMerge(bead.worktree, goal.branch, `Merge ${goal.branch} into ${bead.branch}`, env);
+    if (!merged.ok) conflictFiles = merged.files;
+  }
 
   // The run row goes in before the status flips, so a `running` bead always has an owner on record.
   const run = ctx.store.startRun(bead.id, process.pid, hostname());
@@ -198,7 +212,7 @@ export async function runBead(
   try {
     const result = await ctx.runner.run(
       {
-        seat: 'engineer', cwd: bead.worktree, prompt: assignment(goal, bead, feedback, projectInstructions(bead.worktree)),
+        seat: 'engineer', cwd: bead.worktree, prompt: assignment(goal, bead, feedback, projectInstructions(bead.worktree), conflictFiles),
         systemPrompt: loadPersona('engineer'), env, signal: abort.signal, timeoutMs: limitsOf(ctx).runTimeoutMs,
       },
       record,
@@ -216,15 +230,50 @@ export async function runBead(
       return ctx.store.getBead(bead.id)!;
     }
 
+    // Markers left in the files the engineer was asked to fix mean the conflict is not resolved: do not commit them.
+    if (conflictFiles.length && hasConflictMarkers(bead.worktree, conflictFiles)) {
+      ctx.store.setBeadStatus(bead.id, 'conflict');
+      ctx.store.endRun(run.id, 'unresolved_conflict');
+      ctx.store.log({
+        kind: 'bead.failed', goalId: goal.id, beadId: bead.id, seat: 'engineer',
+        data: { reason: 'unresolved_conflict', run: run.n, files: conflictFiles, tail: result.output.slice(-2000) },
+      });
+      return ctx.store.getBead(bead.id)!;
+    }
     commitAll(bead.worktree, `${bead.title}\n\nOctet bead ${bead.id} (goal ${goal.id})`, env);
-    const ahead = commitsAhead(bead.worktree, goal.branch, env);
-    const ok = result.exitCode === 0 && ahead > 0;
-    ctx.store.setBeadStatus(bead.id, ok ? 'in_review' : 'failed');
-    ctx.store.endRun(run.id, ok ? 'completed' : 'failed');
-    ctx.store.log({
-      kind: ok ? 'bead.ready_for_review' : 'bead.failed', goalId: goal.id, beadId: bead.id, seat: 'engineer',
-      data: { exitCode: result.exitCode, commits: ahead, durationMs: result.durationMs, run: run.n, tail: result.output.slice(-2000) },
-    });
+    if (conflictFiles.length && unmergedFiles(bead.worktree, env).length) {
+      ctx.store.setBeadStatus(bead.id, 'conflict');
+      ctx.store.endRun(run.id, 'unresolved_conflict');
+      ctx.store.log({ kind: 'bead.failed', goalId: goal.id, beadId: bead.id, seat: 'engineer', data: { reason: 'unresolved_conflict', run: run.n, files: unmergedFiles(bead.worktree, env) } });
+      return ctx.store.getBead(bead.id)!;
+    }
+    let ahead = commitsAhead(bead.worktree, goal.branch, env);
+    let ok = result.exitCode === 0 && ahead > 0;
+    // Stale base: other beads may have merged while this one ran. Bring the goal branch in now, so review and the
+    // eventual merge see current code; a conflict goes to the conflict path instead of review.
+    let status: 'in_review' | 'failed' | 'conflict' = ok ? 'in_review' : 'failed';
+    let conflicted: string[] = [];
+    if (ok && commitsBehind(bead.worktree, goal.branch, env) > 0) {
+      const synced = tryMerge(bead.worktree, goal.branch, `Merge ${goal.branch} into ${bead.branch}`, env);
+      if (!synced.ok) {
+        abortMerge(bead.worktree, env);
+        status = 'conflict';
+        conflicted = synced.files;
+        ok = false;
+      } else {
+        ahead = commitsAhead(bead.worktree, goal.branch, env);
+      }
+    }
+    ctx.store.setBeadStatus(bead.id, status);
+    ctx.store.endRun(run.id, status === 'in_review' ? 'completed' : status === 'conflict' ? 'conflict' : 'failed');
+    if (status === 'conflict') {
+      ctx.store.log({ kind: 'bead.conflict', goalId: goal.id, beadId: bead.id, seat: 'marshal', data: { files: conflicted, stage: 'sync' } });
+    } else {
+      ctx.store.log({
+        kind: ok ? 'bead.ready_for_review' : 'bead.failed', goalId: goal.id, beadId: bead.id, seat: 'engineer',
+        data: { exitCode: result.exitCode, commits: ahead, durationMs: result.durationMs, run: run.n, tail: result.output.slice(-2000) },
+      });
+    }
     return ctx.store.getBead(bead.id)!;
   } catch (e) {
     // The runner or git blew up. Never leave the bead `running` with nobody behind it.
@@ -271,9 +320,17 @@ export function approveBead(ctx: Ctx, beadId: string): Bead {
   // Write-ahead: the intent is on the record before the merge happens.
   ctx.store.log({ kind: 'bead.merge.intent', goalId: goal.id, beadId: bead.id, seat: 'marshal', data: { into: goal.branch } });
   try {
-    mergeBranch(goal.worktree, bead.branch, `Merge ${bead.title} (${bead.id})`, env);
+    const merged = tryMerge(goal.worktree, bead.branch, `Merge ${bead.title} (${bead.id})`, env);
+    if (!merged.ok) {
+      // Leave the goal worktree clean, never half-merged, and route the bead to be resolved.
+      abortMerge(goal.worktree, env);
+      ctx.store.setBeadStatus(bead.id, 'conflict');
+      ctx.store.log({ kind: 'bead.conflict', goalId: goal.id, beadId: bead.id, seat: 'marshal', data: { files: merged.files, stage: 'merge' } });
+      return ctx.store.getBead(bead.id)!;
+    }
     removeWorktree(project.path, bead.worktree, env);
   } catch (e) {
+    abortMerge(goal.worktree, env);
     ctx.store.log({ kind: 'bead.merge.failed', goalId: goal.id, beadId: bead.id, seat: 'marshal', data: { message: (e as Error).message } });
     throw e;
   }
@@ -363,7 +420,7 @@ export function requestDelivery(ctx: Ctx, goalId: string): Approval {
   const check = checkRemote(identity, remote);
   if (!check.ok) throw new OctetError(`Refusing to deliver: ${check.reason}`);
 
-  const base = defaultBranch(project.path, env);
+  const base = defaultBranch(project.path, env, project.defaultBranch);
   const approval = ctx.store.insertApproval({
     kind: 'deliver', goalId: goal.id,
     summary: {
@@ -405,8 +462,10 @@ function decideDeliver(ctx: Ctx, approvalId: string, decision: 'approve' | 'deny
 
     const body = ['Delivered by Octet.', '', ...summary.beads.map((t) => `- ${t}`)].join('\n');
     ctx.store.log({ kind: 'delivery.pr.intent', goalId: goal.id, seat: 'courier', data: { base: summary.base } });
-    const url = forge.createPr({ repo: project.path, remote, branch: goal.branch, base: summary.base, title: summary.title, body, identity });
-    ctx.store.log({ kind: 'delivery.pr.opened', goalId: goal.id, seat: 'courier', data: { url } });
+    // A retry after "pushed but PR creation failed" must adopt the PR that exists, not open a second one.
+    const existing = forge.findOpenPr(remote, goal.branch, identity);
+    const url = existing ?? forge.createPr({ repo: project.path, remote, branch: goal.branch, base: summary.base, title: summary.title, body, identity });
+    ctx.store.log({ kind: existing ? 'delivery.pr.adopted' : 'delivery.pr.opened', goalId: goal.id, seat: 'courier', data: { url } });
     ctx.store.upsertPr({ goalId: goal.id, url, number: prNumber(url) ?? 0, state: 'OPEN', reviewDecision: '', checks: 'none' });
     ctx.store.setGoalStatus(goal.id, 'delivered');
   } catch (e) {
@@ -442,6 +501,7 @@ export async function reviewBead(ctx: Ctx, beadId: string): Promise<{ verdict: V
   const goal = ctx.store.getGoal(bead.goalId)!;
   const { identity } = projectOf(ctx, goal.project);
   const diff = beadDiff(ctx, beadId);
+  const truncated = diff.length > DIFF_CAP;
   const prompt = [
     `# Review: ${bead.title}`,
     `Goal: ${goal.title}`,
@@ -455,7 +515,7 @@ export async function reviewBead(ctx: Ctx, beadId: string): Promise<{ verdict: V
     { seat: 'reviewer', cwd: bead.worktree, prompt, systemPrompt: loadPersona('reviewer'), env: childEnv(identity), readOnly: true },
   );
   const parsed = result.exitCode === 0 ? parseVerdict(result.output) : { verdict: 'inconclusive' as const, feedback: result.output.slice(-2000) };
-  ctx.store.log({ kind: 'review.verdict', goalId: goal.id, beadId, seat: 'reviewer', data: { verdict: parsed.verdict, feedback: parsed.feedback.slice(0, 4000) } });
+  ctx.store.log({ kind: 'review.verdict', goalId: goal.id, beadId, seat: 'reviewer', data: { verdict: parsed.verdict, feedback: parsed.feedback.slice(0, 4000), truncated } });
 
   if (parsed.verdict === 'changes_requested') {
     const rounds = ctx.store.countEvents('review.rejected', beadId) + 1;
@@ -466,7 +526,8 @@ export async function reviewBead(ctx: Ctx, beadId: string): Promise<{ verdict: V
     ctx.store.log({ kind: 'review.rejected', goalId: goal.id, beadId, seat: 'reviewer', data: { round: rounds } });
     return { ...parsed, bead: requestChanges(ctx, beadId, parsed.feedback || 'The Reviewer requested changes without details.') };
   }
-  if (parsed.verdict === 'approve' && cfg.autoMerge) {
+  // A review of a truncated diff only saw part of the change, so it can never trigger an automatic merge.
+  if (parsed.verdict === 'approve' && cfg.autoMerge && !truncated) {
     return { ...parsed, bead: approveBead(ctx, beadId) };
   }
   return { ...parsed, bead: ctx.store.getBead(beadId)! };

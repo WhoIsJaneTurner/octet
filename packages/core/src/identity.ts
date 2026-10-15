@@ -95,9 +95,9 @@ export function childEnv(
 }
 
 /** Fetches the gh token for this identity's account. Only the Courier should call this. */
-export function ghToken(id: Identity): string {
+export function ghToken(id: Identity, host?: string): string {
   try {
-    return execFileSync('gh', ['auth', 'token', '--user', id.ghUser], {
+    return execFileSync('gh', ['auth', 'token', '--user', id.ghUser, ...(host && host !== 'github.com' ? ['--hostname', host] : [])], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
@@ -106,19 +106,33 @@ export function ghToken(id: Identity): string {
   }
 }
 
+/** Hosts treated as GitHub. Add GitHub Enterprise hosts with `[github] hosts` in config.toml. */
+let githubHosts: string[] = ['github.com'];
+export function setGithubHosts(hosts: string[]): void {
+  githubHosts = [...new Set(['github.com', ...hosts.map((h) => h.trim().toLowerCase()).filter(Boolean)])];
+}
+export const getGithubHosts = (): readonly string[] => githubHosts;
+
+const esc = (h: string): string => h.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function remoteParts(url: string): { host: string; owner: string; repo: string } | null {
+  const hosts = githubHosts.map(esc).join('|');
+  const m = url.trim().match(new RegExp(`^(?:git@|ssh://git@|https?://(?:[^@/]+@)?)(${hosts})[:/]([^/]+)/([^/]+?)(?:\\.git)?/?$`, 'i'));
+  return m ? { host: m[1]!.toLowerCase(), owner: m[2]!, repo: m[3]! } : null;
+}
+
 export function remoteOwner(url: string): string | null {
-  const m = url
-    .trim()
-    .match(/^(?:git@|ssh:\/\/git@|https?:\/\/(?:[^@/]+@)?)github\.com[:/]([^/]+)\/[^/]+?(?:\.git)?\/?$/);
-  return m?.[1] ?? null;
+  return remoteParts(url)?.owner ?? null;
 }
 
 /** "owner/repo" for a GitHub remote URL, or null. */
 export function remoteSlug(url: string): string | null {
-  const m = url
-    .trim()
-    .match(/^(?:git@|ssh:\/\/git@|https?:\/\/(?:[^@/]+@)?)github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?\/?$/);
-  return m?.[1] ?? null;
+  const p = remoteParts(url);
+  return p ? `${p.owner}/${p.repo}` : null;
+}
+
+/** The host of a GitHub remote (github.com or a configured Enterprise host), or null. */
+export function remoteHost(url: string): string | null {
+  return remoteParts(url)?.host ?? null;
 }
 
 export interface RemoteCheck {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  approveBead, cancelBead, decideApproval, decide, planRequest, reviewBead, runBead, tick, type Ctx, type SchedHooks,
+  approveBead, cancelBead, decideApproval, decide, planRequest, reviewBead, reviewGoal, runBead, tick, type Ctx, type SchedHooks,
 } from '../src/index.ts';
 import { bead, planJson, routed, setup } from './helpers.ts';
 
@@ -14,6 +14,7 @@ function driver(ctx: Ctx) {
   const exec = {
     run: (id: string) => { running.add(id); pending.push(runBead(ctx, id).catch(() => {}).finally(() => running.delete(id))); },
     review: (id: string) => { reviewing.add(id); pending.push(reviewBead(ctx, id).catch(() => {}).finally(() => reviewing.delete(id))); },
+    goalReview: (id: string) => { reviewing.add(id); pending.push(reviewGoal(ctx, id).catch(() => {}).finally(() => reviewing.delete(id))); },
   };
   return {
     hooks,

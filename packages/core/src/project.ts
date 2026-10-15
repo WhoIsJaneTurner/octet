@@ -21,13 +21,15 @@ export interface Project {
   vaultInRepo?: boolean;
   /** Defaults to `plan-gated`. */
   autonomy?: Autonomy;
+  /** The branch work is based on and PRs target, when it cannot be told from the repository. */
+  defaultBranch?: string;
 }
 
 export function loadProjects(file: string = projectsFile()): Project[] {
   if (!existsSync(file)) return [];
   const doc = parse(readFileSync(file, 'utf8')) as {
     projects?: Record<string, {
-      path?: string; identity?: string; vault?: string; vault_git?: boolean; vault_in_repo?: boolean; autonomy?: string;
+      path?: string; identity?: string; vault?: string; vault_git?: boolean; vault_in_repo?: boolean; autonomy?: string; default_branch?: string;
     }>;
   };
   return Object.entries(doc.projects ?? {}).map(([name, t]) => {
@@ -44,6 +46,7 @@ export function loadProjects(file: string = projectsFile()): Project[] {
       ...(t.vault_git ? { vaultGit: true } : {}),
       ...(t.vault_in_repo ? { vaultInRepo: true } : {}),
       ...(t.autonomy ? { autonomy: t.autonomy as Autonomy } : {}),
+      ...(t.default_branch ? { defaultBranch: t.default_branch } : {}),
     };
   });
 }
@@ -53,9 +56,10 @@ export interface ProjectOptions {
   vaultGit?: boolean;
   vaultInRepo?: boolean;
   autonomy?: string;
+  defaultBranch?: string;
 }
 
-function checkOptions(o: ProjectOptions): Pick<Project, 'vault' | 'vaultGit' | 'vaultInRepo' | 'autonomy'> {
+function checkOptions(o: ProjectOptions): Pick<Project, 'vault' | 'vaultGit' | 'vaultInRepo' | 'autonomy' | 'defaultBranch'> {
   if (o.autonomy !== undefined && !AUTONOMY_LEVELS.includes(o.autonomy as Autonomy)) {
     throw new OctetError(`autonomy must be one of ${AUTONOMY_LEVELS.join(', ')}`);
   }
@@ -64,6 +68,7 @@ function checkOptions(o: ProjectOptions): Pick<Project, 'vault' | 'vaultGit' | '
     ...(o.vaultGit ? { vaultGit: true } : {}),
     ...(o.vaultInRepo ? { vaultInRepo: true } : {}),
     ...(o.autonomy ? { autonomy: o.autonomy as Autonomy } : {}),
+    ...(o.defaultBranch ? { defaultBranch: o.defaultBranch } : {}),
   };
 }
 
@@ -73,6 +78,7 @@ function saveProjects(list: Project[], file: string): void {
     path: e.path, identity: e.identity,
     ...(e.vault ? { vault: e.vault } : {}), ...(e.vaultGit ? { vault_git: true } : {}),
     ...(e.vaultInRepo ? { vault_in_repo: true } : {}), ...(e.autonomy ? { autonomy: e.autonomy } : {}),
+    ...(e.defaultBranch ? { default_branch: e.defaultBranch } : {}),
   }]));
   writeFileSync(file, stringify({ projects }) + '\n');
 }

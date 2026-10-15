@@ -91,7 +91,7 @@ const LANES: { key: Bead['status'][]; title: string }[] = [
   { key: ['todo', 'failed'], title: 'todo' },
   { key: ['running'], title: 'running' },
   { key: ['in_review'], title: 'review' },
-  { key: ['changes_requested'], title: 'changes' },
+  { key: ['changes_requested', 'conflict'], title: 'changes' },
   { key: ['merged'], title: 'merged' },
 ];
 

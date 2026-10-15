@@ -43,13 +43,15 @@ test('validator: rejects cycles, missing deps, duplicate titles/ids, big sizes, 
   assert.match(errs([]), /JSON object/);
 });
 
-test('validator: bead-count and size ceilings; shared files without a dependency warn', () => {
+test('validator: bead-count and size ceilings; shared files without a dependency are an error unless justified', () => {
   const many = base(); many.beads = Array.from({ length: 13 }, (_, i) => bead(`x${i}`));
   assert.match(errs(many), /Too many beads/);
   const heavy = base(); heavy.beads = Array.from({ length: 10 }, (_, i) => bead(`x${i}`, { size: 'm' }));
   assert.match(errs(heavy), /ceiling/);
   const shared = base(); shared.beads = [bead('b1', { files: ['src/a.ts'] }), bead('b2', { files: ['src/a.ts'] })];
-  assert.match(ok(validatePlan(shared)).warnings.join('\n'), /Conflict risk: "b1" and "b2" both touch src\/a.ts/);
+  assert.match(errs(shared), /Beads "b1" and "b2" both edit src\/a.ts with no dependency/);
+  const justified = base(); justified.beads = [bead('b1', { files: ['src/a.ts'] }), bead('b2', { files: ['src/a.ts'], shared_files_note: 'different functions' })];
+  assert.match(ok(validatePlan(justified)).warnings.join('\n'), /Conflict risk, justified: "b1" and "b2" both touch src\/a.ts \(different functions\)/);
   const ordered = base(); ordered.beads = [bead('b1', { files: ['src/a.ts'] }), bead('b2', { files: ['src/a.ts'], depends_on: ['b1'] })];
   assert.deepEqual(ok(validatePlan(ordered)).warnings, []);
 });

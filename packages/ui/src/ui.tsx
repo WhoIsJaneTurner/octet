@@ -23,6 +23,7 @@ export const STATUS: Record<BeadStatus, { glyph: string; label: string; cls: str
   running: { glyph: '▶', label: 'running', cls: 'amber' },
   in_review: { glyph: '◆', label: 'in review', cls: 'cyan' },
   changes_requested: { glyph: '↺', label: 'changes requested', cls: 'amber' },
+  conflict: { glyph: '⚡', label: 'merge conflict', cls: 'amber' },
   merged: { glyph: '✔', label: 'merged', cls: '' },
   failed: { glyph: '✖', label: 'failed', cls: 'red' },
 };

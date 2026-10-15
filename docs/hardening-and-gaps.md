@@ -65,16 +65,16 @@ Done in session two: cancel, timeout, persisted output, heartbeat-based orphan d
 | Reviews cannot be cancelled | Same mechanism (signal plus heartbeat) applies to Reviewer runs; not wired yet |
 | Output redaction | Run logs are written raw; see the security backlog |
 
-## 4. Git correctness (M)
+## 4. Git correctness (M): done
 
-- **Merge conflicts.** `approveBead` merges the bead branch into the goal worktree. If it conflicts, `mergeBranch` throws, `bead.merge.failed` is logged, and the goal worktree may be left mid-merge. Needed: abort the merge cleanly (`git merge --abort`), mark the bead `conflict`, and route it (Marshal asks the engineer to rebase and resolve with the conflict shown, or escalates to you after one attempt).
-- **Stale base.** A bead branches from the goal branch when it starts. If other beads merge meanwhile, its diff is against an old base. Before review, rebase or merge the current goal branch into the bead branch and re-run checks; a conflict follows the path above.
-- **Same-file beads.** The plan validator flags beads that share a file with no dependency; once conflict handling exists, make it an error unless the Architect justifies it.
-- **Goal-level review.** Reviewing each bead does not review the combined change. Add a Reviewer pass over the whole goal diff before delivery, as a gate that can send work back (today the equivalent exists only as the optional PR comment).
-- **Delivery idempotency.** If the push succeeded and PR creation failed, a retry pushes again (harmless) and tries to create a second PR. Detect an existing open PR for the branch and adopt it.
-- **Default branch detection** falls back to the current branch when `origin/HEAD` is missing. Prefer asking the remote, and refuse to guess when ambiguous.
-- **Remote formats.** The owner guard understands GitHub SSH and HTTPS URLs only. Add GitHub Enterprise hosts if needed; keep GitLab out of scope until requested.
-- **Large diffs.** Reviewer input is truncated at 60,000 characters with a marker. A truncated review must not be able to produce an automatic approval: treat truncation as `inconclusive` for auto-merge purposes.
+- **Merge conflicts.** `approveBead` uses `tryMerge`: a conflict aborts the merge (the goal worktree is left clean, never half-merged), sets the bead to the new `conflict` status and logs `bead.conflict` with the files. Re-running a `conflict` bead merges the goal branch into the bead's worktree so the markers are in front of the engineer, whose prompt names the files. Markers left behind are not committed (`unresolved_conflict`). The scheduler gives the engineer exactly one automatic attempt, then raises a `merge_conflict` escalation.
+- **Stale base.** At the end of an engineer run, if the goal branch moved on, it is merged into the bead branch; a clean merge continues to review, a conflict goes to the `conflict` path instead. No test command is run (there is no project-level check command yet).
+- **Same-file beads.** The plan validator now rejects beads that share a file with no dependency between them, unless one carries a `shared_files_note` justifying it (then it is a warning at the gate).
+- **Goal-level review.** `reviewGoal` (goalreview.ts): the Reviewer reads the combined diff against the default branch before delivery. Changes requested become a fix bead (same round cap as bead reviews, then a `goal_review_rounds` escalation). Delivery of scheduler-managed goals waits for a review made after the latest merge. Turn it off with `[review] goal_review = false`.
+- **Delivery idempotency.** `Forge.findOpenPr`; delivery adopts an existing open PR for the branch (`delivery.pr.adopted`) instead of opening a second.
+- **Default branch.** origin/HEAD, then a lone `main`/`master`, then a single branch, then `git ls-remote`; otherwise an error naming `default_branch` (a new per-project setting).
+- **Remote formats.** `[github] hosts = ["ghe.example.com"]` in config.toml. Owner, slug and host parsing and the `gh` arguments (`--hostname`, `GH_HOST`) support it; not tested against a real Enterprise server. GitLab stays out of scope.
+- **Large diffs.** A truncated bead review records `truncated: true`; it can never auto-merge (neither the Reviewer's `auto_merge` nor the scheduler), and the scheduler raises `review_truncated`. A truncated goal review cannot approve delivery.
 
 ## 5. Cost and usage (S to M)
 

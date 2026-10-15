@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import {
   addBead, addProject, approveBead, beadDiff, cancelBead, createGoal, decideApproval, editPlan, getProject, loadIdentities, loadLimits, loadPlanning, loadProjects,
-  loadReview, openVault, planRequest, rejectPlan, tick, verifyPlans, OctetError, readRunOutput, reconcileRunning, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestChanges, requestDelivery, requestPrecomment, reviewBead, runBead, SEATS, type AgentRunner, type Ctx, type Forge, type Limits, type Store,
+  loadGithubHosts, loadReview, openVault, planRequest, rejectPlan, reviewGoal, setGithubHosts, tick, verifyPlans, OctetError, readRunOutput, reconcileRunning, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestChanges, requestDelivery, requestPrecomment, reviewBead, runBead, SEATS, type AgentRunner, type Ctx, type Forge, type Limits, type Store,
 } from '@octet/core';
 
 export interface DaemonOptions {
@@ -81,6 +81,7 @@ const str = (body: Record<string, unknown>, key: string): string => {
 export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
   const token = opts.token ?? randomBytes(24).toString('hex');
   const { store, runner } = opts;
+  setGithubHosts(loadGithubHosts());
   const recovered = reconcileRunning(store);
   if (recovered.length) console.warn(`octet: recovered ${recovered.length} interrupted bead(s): ${recovered.join(', ')}`);
   const ctx: Ctx = {
@@ -162,6 +163,18 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
           try { startRun(beadId); } catch { /* cap reached or already running: the human takes over */ }
         }
       });
+  };
+
+  const startGoalReview = (goalId: string) => {
+    if (reviewing.has(goalId)) return;
+    reviewing.add(goalId);
+    push('change', {});
+    void reviewGoal(ctx, goalId)
+      .catch((e: unknown) => {
+        store.log({ kind: 'review.error', goalId, seat: 'reviewer', data: { message: (e as Error).message } });
+        store.escalate({ goalId, reason: 'goal_review_failed', message: `The final review failed: ${(e as Error).message}` });
+      })
+      .finally(() => { reviewing.delete(goalId); push('change', {}); });
   };
 
   async function route(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
@@ -346,6 +359,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
       tick(ctx, { isRunning: (id) => running.has(id), isReviewing: (id) => reviewing.has(id) }, {
         run: (id) => startRun(id),
         review: (id) => startReview(id),
+        goalReview: (id) => startGoalReview(id),
       });
     } catch (e) {
       console.error('octet: scheduler tick failed', e);

@@ -28,7 +28,7 @@ export function Detail({ bead, goal, beads, output, running, reviewing, events, 
     return <Box title="Bead"><span className="faint">Select a bead. <span className="cursor" /></span></Box>;
   }
   const blocked = bead.dependsOn.filter((d) => beads.find((b) => b.id === d)?.status !== 'merged');
-  const canRun = ['todo', 'failed', 'changes_requested'].includes(bead.status) && blocked.length === 0 && !running;
+  const canRun = ['todo', 'failed', 'changes_requested', 'conflict'].includes(bead.status) && blocked.length === 0 && !running;
 
   const act = async (path: string, body?: unknown) => {
     setBusy(true); setError(null);
@@ -49,7 +49,7 @@ export function Detail({ bead, goal, beads, output, running, reviewing, events, 
         {bead.dependsOn.length > 0 && <div className="dim">after: {bead.dependsOn.join(', ')}{blocked.length ? <span className="amber"> (waiting on {blocked.join(', ')})</span> : null}</div>}
         <pre className="dim" style={{ marginTop: 6 }}>{bead.brief}</pre>
         <div className="row">
-          <button disabled={!canRun || busy} onClick={() => void act('run')}>[r] {bead.status === 'changes_requested' ? 'RE-RUN' : 'RUN'}</button>
+          <button disabled={!canRun || busy} onClick={() => void act('run')}>[r] {bead.status === 'changes_requested' ? 'RE-RUN' : bead.status === 'conflict' ? 'RESOLVE CONFLICT' : 'RUN'}</button>
           {bead.status === 'running' && <button disabled={busy} onClick={() => void act('cancel')}>[x] CANCEL</button>}
           <button disabled={bead.status !== 'in_review' || busy || reviewing} onClick={() => void act('review')}>[v] AI REVIEW</button>
           <button disabled={bead.status !== 'in_review' || busy} onClick={() => void act('approve')}>[a] APPROVE + MERGE</button>

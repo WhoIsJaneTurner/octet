@@ -34,4 +34,4 @@ Reply with one JSON object and nothing else (a fenced block is fine):
 }
 ```
 
-Rules: every bead has an objective and at least one acceptance item; sizes are xs, s or m (split anything bigger); `depends_on` lists plan ids and must not cycle; paths are relative to the repository root; two beads that edit the same file need a dependency between them. A malformed reply gets one retry with the errors, then the step fails.
+Rules: every bead has an objective and at least one acceptance item; sizes are xs, s or m (split anything bigger); `depends_on` lists plan ids and must not cycle; paths are relative to the repository root; two beads that edit the same file need a dependency between them (or a `shared_files_note` saying why they can run in parallel). A malformed reply gets one retry with the errors, then the step fails.

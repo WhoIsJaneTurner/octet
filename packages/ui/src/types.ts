@@ -1,4 +1,4 @@
-export type BeadStatus = 'todo' | 'running' | 'in_review' | 'changes_requested' | 'merged' | 'failed';
+export type BeadStatus = 'todo' | 'running' | 'in_review' | 'changes_requested' | 'conflict' | 'merged' | 'failed';
 
 export interface Seat { id: string; title: string; job: string; kind: 'llm' | 'deterministic'; writesCode: boolean }
 export interface Identity { id: string; ghUser: string; email: string }

@@ -16,7 +16,7 @@ Effort sizes are rough: **S** is under half a day, **M** is one to two days, **L
 
 ## 1. What exists today
 
-Everything below is implemented, tested (113 unit and integration tests) and pushed to `WhoIsJaneTurner/octet`. Items marked "real run" were also exercised against Claude Code and, where noted, GitHub.
+Everything below is implemented, tested (125 unit and integration tests) and pushed to `WhoIsJaneTurner/octet`. Items marked "real run" were also exercised against Claude Code and, where noted, GitHub.
 
 | Area | State |
 |---|---|
@@ -60,7 +60,7 @@ Each step is shippable on its own and leaves the product working.
 | 4 | ~~Architect + plan gate (P1)~~ **Done** | planning §6 | M | First time a typed request becomes a plan you approve |
 | 5 | ~~Marshal decomposition + validation (P2)~~ **Done** (model refinement flag not built) | planning §6 | M | Plan becomes beads |
 | 6 | ~~Scheduler loop (P3)~~ **Done**, with autonomy levels | planning §7 | L | The "describe it, approve the plan, come back to a PR" experience |
-| 7 | Merge-conflict handling and stale-base rebasing | hardening §4 | M | Needed the moment two beads touch the same file |
+| 7 | ~~Merge-conflict handling and stale-base rebasing~~ **Done** | hardening §4 | M | Needed the moment two beads touch the same file |
 | 8 | GitHub issue intake | intake §3 | M | First external source; read-only |
 | 9 | Scout + Chair conversational intake (P4) | planning §6 | M | Better plans, fewer wrong guesses |
 | 10 | Autonomy levels + planning evals (P5) | planning §8 | M | Makes quality measurable before trusting more autonomy |

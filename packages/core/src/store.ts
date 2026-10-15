@@ -7,7 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 export type GoalStatus = 'planning' | 'plan_ready' | 'active' | 'delivered' | 'done' | 'failed';
 /** Statuses that hold one of the active-goal slots. */
 export const OPEN_GOAL_STATUSES: readonly GoalStatus[] = ['planning', 'plan_ready', 'active'];
-export type BeadStatus = 'todo' | 'running' | 'in_review' | 'changes_requested' | 'merged' | 'failed';
+export type BeadStatus = 'todo' | 'running' | 'in_review' | 'changes_requested' | 'conflict' | 'merged' | 'failed';
 
 export interface Goal {
   id: string;
@@ -639,6 +639,16 @@ export class Store {
       .prepare('SELECT * FROM events WHERE kind = ? AND bead_id = ? ORDER BY id DESC LIMIT 1')
       .get(kind, beadId) as Row | undefined;
     return r && toEvent(r);
+  }
+
+  /** Most recent event of a kind for a goal (any bead), e.g. the last merge or the last goal-level verdict. */
+  lastGoalEvent(kind: string, goalId: string): OctetEvent | undefined {
+    const r = this.db.prepare('SELECT * FROM events WHERE kind = ? AND goal_id = ? ORDER BY id DESC LIMIT 1').get(kind, goalId) as Row | undefined;
+    return r && toEvent(r);
+  }
+
+  countGoalEvents(kind: string, goalId: string): number {
+    return Number((this.db.prepare('SELECT COUNT(*) AS n FROM events WHERE kind = ? AND goal_id = ?').get(kind, goalId) as Row).n);
   }
 
   events(limit = 50): OctetEvent[] {

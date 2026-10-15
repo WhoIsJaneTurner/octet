@@ -106,6 +106,10 @@ export class FakeRunner implements AgentRunner {
   }
   /** Seats that block until their signal aborts or their timeout elapses, like a stuck agent. */
   readonly hang = new Set<SeatId>();
+  /** Write a different file per worktree, so separate beads merge cleanly (the default same-name file makes them conflict). */
+  uniqueFiles = false;
+  /** Runs after the fake engineer's write, to simulate edits (conflict markers, huge files). */
+  afterEngineer?: (req: RunRequest) => void;
   /** Exit code to report per seat (default 0): lets a test make the engineer fail. */
   readonly exit = new Map<SeatId, number>();
   async run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
@@ -123,7 +127,10 @@ export class FakeRunner implements AgentRunner {
         if (req.timeoutMs) timer = setTimeout(() => done({ timedOut: true }), req.timeoutMs);
       });
     }
-    if (req.seat === 'engineer') writeFileSync(join(req.cwd, `${req.seat}-output.txt`), req.prompt);
+    if (req.seat === 'engineer') {
+      writeFileSync(join(req.cwd, this.uniqueFiles ? `${req.seat}-output-${req.cwd.split('/').pop()}.txt` : `${req.seat}-output.txt`), req.prompt);
+      this.afterEngineer?.(req);
+    }
     const output = this.queues.get(req.seat)?.shift() ?? this.replies[req.seat] ?? 'fake run complete\n';
     onChunk?.(output);
     return { exitCode: this.exit.get(req.seat) ?? 0, output, durationMs: 1 };
