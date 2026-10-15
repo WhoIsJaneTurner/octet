@@ -7,6 +7,11 @@ import {
   addBead, addProject, approveBead, beadDiff, cancelBead, createGoal, decideApproval, editPlan, getProject, loadIdentities, loadLimits, loadPlanning, loadProjects,
   loadReview, openVault, planRequest, rejectPlan, tick, verifyPlans, OctetError, readRunOutput, reconcileRunning, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestChanges, requestDelivery, requestPrecomment, reviewBead, runBead, SEATS, type AgentRunner, type Ctx, type Forge, type Limits, type Store,
 } from '@octet/core';
+import {
+  abandonGoal, deleteBead, doctorIdentities, editBead, gc, loadNotify, loadUsage, projectsFile, updateProject, usageCeiling,
+  type IdentityHealth, type UsageConfig,
+} from '@octet/core';
+import { macosNotifier, watchForNotifications, type Notifier } from './notify.ts';
 
 export interface DaemonOptions {
   store: Store;
@@ -24,6 +29,12 @@ export interface DaemonOptions {
   scheduler?: boolean;
   /** Overrides the limits read from config.toml (tests use this for determinism). */
   limits?: Limits;
+  /** Overrides `[usage]` from config.toml. */
+  usage?: UsageConfig;
+  /** Called when an approval arrives or a goal needs you. Default: macOS notifications if `[notify] macos = true`. */
+  notifier?: Notifier;
+  /** Runs the identity checks (talks to GitHub). Tests replace it. */
+  doctor?: (ids: Parameters<typeof doctorIdentities>[0]) => Promise<IdentityHealth[]>;
 }
 
 export interface Daemon {
@@ -72,6 +83,26 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
   }
 }
 
+/** The optional project fields from a request body. Wrong types are an error, not silently ignored. */
+function projectOptions(b: Record<string, unknown>): { vault?: string; vaultGit?: boolean; vaultInRepo?: boolean; autonomy?: string } {
+  const text = (k: string) => {
+    const v = b[k];
+    if (v === undefined || v === null || v === '') return undefined;
+    if (typeof v !== 'string') throw new HttpError(400, `"${k}" must be text`);
+    return v;
+  };
+  const flag = (k: string) => {
+    if (b[k] !== undefined && typeof b[k] !== 'boolean') throw new HttpError(400, `"${k}" must be true or false`);
+    return b[k] === true;
+  };
+  const vault = text('vault');
+  const autonomy = text('autonomy');
+  return {
+    ...(vault ? { vault } : {}), ...(flag('vaultGit') ? { vaultGit: true } : {}), ...(flag('vaultInRepo') ? { vaultInRepo: true } : {}),
+    ...(autonomy ? { autonomy } : {}),
+  };
+}
+
 const str = (body: Record<string, unknown>, key: string): string => {
   const v = body[key];
   if (typeof v !== 'string' || !v.trim()) throw new HttpError(400, `"${key}" is required`);
@@ -85,9 +116,35 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
   if (recovered.length) console.warn(`octet: recovered ${recovered.length} interrupted bead(s): ${recovered.join(', ')}`);
   const ctx: Ctx = {
     store, runner, runsDir: opts.runsDir ?? runsDir(), ...(opts.forge ? { forge: opts.forge } : {}), limits: opts.limits ?? loadLimits(), review: loadReview(), planning: loadPlanning(),
+    usage: opts.usage ?? loadUsage(),
     identities: loadIdentities(opts.identitiesFile),
     projects: loadProjects(opts.projectsFile),
   };
+  // projects.toml is the source of truth and the CLI edits it, so the daemon notices when it changes (checked on every
+  // request and every 2 s, so an open UI updates too). A broken file keeps the last good list and reports why.
+  const projectsPath = opts.projectsFile ?? projectsFile();
+  const projectsSig = () => { try { const st = statSync(projectsPath); return `${st.mtimeMs}:${st.size}`; } catch { return ''; } };
+  let seenProjects = projectsSig();
+  let projectsError: string | undefined;
+  const reloadProjects = (force = false) => {
+    const sig = projectsSig();
+    if (sig === seenProjects && !force) return;
+    seenProjects = sig;
+    try {
+      ctx.projects.splice(0, ctx.projects.length, ...loadProjects(opts.projectsFile));
+      projectsError = undefined;
+    } catch (e) {
+      projectsError = (e as Error).message;
+    }
+    push('change', {});
+  };
+  const projectsWatch = setInterval(() => reloadProjects(), 2000);
+  projectsWatch.unref();
+
+  const notifier = opts.notifier ?? (loadNotify().macos ? macosNotifier() : undefined);
+  const stopNotify = notifier ? watchForNotifications(store, notifier) : undefined;
+  let doctorRun: Promise<IdentityHealth[]> | undefined;
+
   const outputs = new Map<string, string>();
   const clients = new Set<ServerResponse>();
   const running = new Set<string>();
@@ -118,8 +175,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     events: store.events(200),
     // Runs owned by other processes (the CLI) count too, so the cap and the UI see them.
     running: store.listBeads().filter((b) => b.status === 'running').map((b) => b.id),
-    reviewing: [...reviewing],
+    // Reviews started from the CLI count too: they have a run row.
+    reviewing: [...new Set([...reviewing, ...store.openRuns().filter((r) => r.kind === 'review').map((r) => r.beadId)])],
     review: ctx.review,
+    usage: { ...store.usageSummary(), ceiling: ctx.usage ?? {}, hold: usageCeiling(ctx) },
+    projectsError,
   });
 
   const startRun = (beadId: string) => {
@@ -171,6 +231,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     };
     const path = url.pathname;
     const method = req.method ?? 'GET';
+    reloadProjects();
 
     if (path === '/api/events' && method === 'GET') {
       res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
@@ -184,10 +245,41 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     let m: RegExpMatchArray | null;
     if (path === '/api/projects' && method === 'POST') {
       const b = await readJson(req);
-      const p = addProject({ name: str(b, 'name'), path: str(b, 'path'), identity: str(b, 'identity') }, ctx.identities, opts.projectsFile);
-      ctx.projects.splice(0, ctx.projects.length, ...loadProjects(opts.projectsFile));
-      push('change', {});
+      const p = addProject({ name: str(b, 'name'), path: str(b, 'path'), identity: str(b, 'identity'), ...projectOptions(b) }, ctx.identities, opts.projectsFile);
+      reloadProjects(true);
       return json(201, p);
+    }
+    if ((m = path.match(/^\/api\/projects\/([\w.-]+)$/)) && method === 'POST') {
+      const p = updateProject(m[1]!, projectOptions(await readJson(req)), opts.projectsFile);
+      reloadProjects(true);
+      return json(200, p);
+    }
+    if (path === '/api/identities/doctor' && method === 'POST') {
+      // On demand only: it shells out to ssh and gh. One check at a time.
+      doctorRun ??= (opts.doctor ?? doctorIdentities)(ctx.identities).finally(() => { doctorRun = undefined; });
+      return json(200, { results: await doctorRun, at: new Date().toISOString() });
+    }
+    if (path === '/api/gc' && (method === 'GET' || method === 'POST')) {
+      const apply = method === 'POST' && (await readJson(req)).apply === true;
+      const result = gc(ctx, { apply });
+      if (apply) push('change', {});
+      return json(200, result);
+    }
+    if ((m = path.match(/^\/api\/goals\/([\w-]+)\/abandon$/)) && method === 'POST') {
+      const b = await readJson(req);
+      const res = await abandonGoal(ctx, m[1]!, { ...(typeof b.reason === 'string' && b.reason.trim() ? { reason: b.reason } : {}) });
+      push('change', {});
+      return json(200, res);
+    }
+    if ((m = path.match(/^\/api\/beads\/([\w-]+)\/edit$/)) && method === 'POST') {
+      const b = await readJson(req);
+      return json(200, editBead(ctx, m[1]!, {
+        ...(typeof b.title === 'string' ? { title: b.title } : {}), ...(typeof b.brief === 'string' ? { brief: b.brief } : {}),
+      }));
+    }
+    if ((m = path.match(/^\/api\/beads\/([\w-]+)$/)) && method === 'DELETE') {
+      deleteBead(ctx, m[1]!);
+      return json(200, { deleted: m[1] });
     }
     if (path === '/api/requests' && method === 'POST') {
       const b = await readJson(req);
@@ -411,6 +503,8 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
       clearInterval(poll);
       clearInterval(sweep);
       clearInterval(beat);
+      clearInterval(projectsWatch);
+      stopNotify?.();
       clearTimeout(pending);
       for (const c of clients) c.end();
       server.close(() => resolve());

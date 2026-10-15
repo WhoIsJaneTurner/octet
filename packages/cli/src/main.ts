@@ -5,6 +5,7 @@ import {
   addBead, addProject, approveBead, cancelBead, ClaudeCodeRunner, createGoal, dbFile, decideApproval, editPlan, FakeRunner, getIdentity,
   ghToken, loadIdentities, loadLimits, loadProjects, loadPlanning, loadReview, OctetError, openVault, planRequest, rejectPlan, rejectRequest, renderPlan, updateProject, verifyPlans, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
 } from '@octet/core';
+import { abandonGoal, deleteBead, doctorIdentities, editBead, gc, loadUsage, usageCeiling } from '@octet/core';
 
 const USAGE = `octet <command>
 
@@ -24,12 +25,17 @@ const USAGE = `octet <command>
   plan reject <id> <feedback>       send it back; the Architect plans again
   plan edit <id> --file <json>      replace the plan with your edit (saved as a new version)
   goal pause|resume <goal>          stop or restart the scheduler for a goal
+  goal abandon <goal>               give up on a goal: stop its agents, remove its worktrees (branches stay)
+  gc [--yes]                        list leftover worktrees; with --yes, delete them
+  usage                             tokens and estimated cost per day, goal and bead
   escalation list|resolve <id>      things the scheduler needs you for
   goal new <project> <title>
   goal list
   bead add <goal> <title> --brief <text> [--after <bead>]...
   bead run <bead> [--fake]          build a bead with an Engineer
-  bead cancel <bead>                stop a running engineer (works while the daemon or another shell runs it)
+  bead cancel <bead>                stop a running engineer or reviewer (works while the daemon or another shell runs it)
+  bead edit <bead> [--title <t>] [--brief <text>]   change a bead that has not run yet
+  bead delete <bead>                delete a bead that has not run and that no other bead waits on
   bead review <bead>                have the Reviewer read the diff and give a verdict
   bead approve <bead>               merge a reviewed bead into its goal branch
   goal deliver <goal>               ask to push + open a PR (nothing is sent yet)
@@ -52,6 +58,7 @@ function makeCtx(fake: boolean): Ctx {
     limits: loadLimits(),
     review: loadReview(),
     planning: loadPlanning(),
+    usage: loadUsage(),
     runsDir: runsDir(),
   };
 }
@@ -63,6 +70,8 @@ async function main(argv: string[]): Promise<void> {
     options: {
       identity: { type: 'string' },
       brief: { type: 'string' },
+      title: { type: 'string' },
+      yes: { type: 'boolean' },
       body: { type: 'string' },
       vault: { type: 'string' },
       'vault-git': { type: 'boolean' },
@@ -89,13 +98,9 @@ async function main(argv: string[]): Promise<void> {
     }
     if (cmd === 'doctor') {
       let bad = 0;
-      for (const i of ids) {
-        const who = sshWhoAmI(i);
-        const sshOk = who?.toLowerCase() === i.ghUser.toLowerCase();
-        let tokenOk = true;
-        try { ghToken(i); } catch { tokenOk = false; }
-        if (!sshOk || !tokenOk) bad++;
-        console.log(`${sshOk && tokenOk ? 'ok  ' : 'FAIL'} ${i.id}: ssh=${who ?? 'no auth'} (want ${i.ghUser}), gh token=${tokenOk ? 'yes' : 'no'}`);
+      for (const h of await doctorIdentities(ids)) {
+        if (!h.ok) bad++;
+        console.log(`${h.ok ? 'ok  ' : 'FAIL'} ${h.id}: ssh=${h.sshUser ?? 'no auth'} (want ${h.ghUser}), gh token=${h.tokenOk ? 'yes' : 'no'}`);
       }
       process.exitCode = bad ? 1 : 0;
       return;
@@ -220,6 +225,12 @@ async function main(argv: string[]): Promise<void> {
       store.log({ kind: cmd === 'pause' ? 'goal.paused' : 'goal.resumed', goalId: rest[0] });
       return void console.log(`goal ${rest[0]}: ${cmd}d`);
     }
+    if (cmd === 'abandon') {
+      const [id] = rest;
+      if (!id) throw new OctetError('usage: goal abandon <goal>');
+      const r = await abandonGoal(makeCtx(true), id);
+      return void console.log(`goal ${id}: abandoned. Stopped ${r.cancelled.length} agent(s), removed ${r.removed.length} worktree(s); branches are kept.${r.stillRunning.length ? `\nStill running (worktrees kept; run \`octet gc\` later): ${r.stillRunning.join(', ')}` : ''}`);
+    }
     if (cmd === 'new') {
       const [project, ...title] = rest;
       if (!project || !title.length) throw new OctetError('usage: goal new <project> <title>');
@@ -269,8 +280,21 @@ async function main(argv: string[]): Promise<void> {
       const [id] = rest;
       if (!id) throw new OctetError('usage: bead review <bead> [--fake]');
       const r = await reviewBead(makeCtx(Boolean(values.fake)), id);
+      if (r.cancelled) return void console.log(`review of ${id} was cancelled; the bead is still ${r.bead.status}`);
       console.log(`${r.feedback}\n\nverdict: ${r.verdict}; bead is now ${r.bead.status}`);
       return;
+    }
+    if (cmd === 'edit') {
+      const [id] = rest;
+      if (!id || (values.title === undefined && values.brief === undefined)) throw new OctetError('usage: bead edit <bead> [--title <t>] [--brief <text>]');
+      const b = editBead(makeCtx(true), id, { ...(values.title !== undefined ? { title: values.title } : {}), ...(values.brief !== undefined ? { brief: values.brief } : {}) });
+      return void console.log(`bead ${b.id}: updated`);
+    }
+    if (cmd === 'delete') {
+      const [id] = rest;
+      if (!id) throw new OctetError('usage: bead delete <bead>');
+      deleteBead(makeCtx(true), id);
+      return void console.log(`bead ${id}: deleted`);
     }
     if (cmd === 'approve') {
       const [id] = rest;
@@ -309,6 +333,35 @@ async function main(argv: string[]): Promise<void> {
       const r = await reviewExternalPr(makeCtx(Boolean(values.fake)), { url: rest[0], identity: values.identity });
       return void console.log(`${r.feedback}\n\nverdict: ${r.verdict}  (nothing was posted)`);
     }
+  }
+
+  if (group === 'gc') {
+    const r = gc(makeCtx(true), { apply: values.yes === true });
+    if (!r.stragglers.length) return void console.log('nothing to clean up');
+    for (const s of r.stragglers) console.log(`${r.removed.includes(s.path) ? 'removed' : 'found  '} ${s.path}  (${s.reason})`);
+    for (const f of r.failed) console.log(`FAILED  ${f.path}: ${f.message}`);
+    if (!values.yes) console.log('\nThis was a dry run. Delete these with: octet gc --yes   (branches are never deleted)');
+    process.exitCode = r.failed.length ? 1 : 0;
+    return;
+  }
+
+  if (group === 'usage') {
+    const ctx = makeCtx(true);
+    const u = ctx.store.usageSummary();
+    const money = (n: number) => `$${n.toFixed(2)}`;
+    const row = (label: string, t: { runs: number; costUsd: number; inputTokens: number; outputTokens: number; cacheReadTokens: number }) =>
+      `${label.padEnd(34)} ${String(t.runs).padStart(4)} runs  ${money(t.costUsd).padStart(8)}  in ${t.inputTokens}  out ${t.outputTokens}  cache-read ${t.cacheReadTokens}`;
+    console.log(row('today', u.today));
+    const hold = usageCeiling(ctx);
+    if (hold) console.log(`  ceiling reached: ${hold}`);
+    else if (ctx.usage?.dailyCostUsd !== undefined || ctx.usage?.dailyRuns !== undefined) console.log(`  ceiling: ${ctx.usage.dailyCostUsd !== undefined ? money(ctx.usage.dailyCostUsd) : 'no cost limit'}, ${ctx.usage.dailyRuns ?? 'no'} runs per day`);
+    for (const d of u.byDay) console.log(row(`  ${d.day}`, d));
+    for (const g of ctx.store.listGoals()) if (u.byGoal[g.id]) {
+      console.log(row(`goal ${g.id}`, u.byGoal[g.id]!));
+      for (const b of ctx.store.listBeads(g.id)) if (u.byBead[b.id]) console.log(row(`  ${b.id} ${b.title}`.slice(0, 34), u.byBead[b.id]!));
+    }
+    console.log('\nCosts are Claude Code\'s own estimate at list prices, not a bill.');
+    return;
   }
 
   if (group === 'audit' && cmd === 'verify') {

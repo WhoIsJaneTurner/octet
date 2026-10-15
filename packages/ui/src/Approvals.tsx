@@ -4,8 +4,8 @@ import type { Approval, Escalation, Goal, PlanSummary } from './types';
 import { Box, IdentityTag } from './ui';
 
 /** The Warden's inbox: every outbound action waits here with its exact target, account and diff. */
-export function Inbox({ approvals, goals, order, onDone, setError }: {
-  approvals: Approval[]; goals: Goal[]; order: string[]; onDone: () => void; setError: (m: string | null) => void;
+export function Inbox({ approvals, goals, order, onOpen, onDone, setError }: {
+  approvals: Approval[]; goals: Goal[]; order: string[]; onOpen: (goalId: string) => void; onDone: () => void; setError: (m: string | null) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const pending = approvals.filter((a) => a.status === 'pending');
@@ -22,7 +22,7 @@ export function Inbox({ approvals, goals, order, onDone, setError }: {
         const goal = goals.find((g) => g.id === a.goalId);
         if (a.kind === 'plan') {
           return <PlanCard key={a.id} approval={a} summary={a.summary as unknown as PlanSummary} title={goal?.title ?? a.goalId}
-            busy={busy === a.id} onApprove={() => void decide(a.id, 'approve')} onDone={onDone} setError={setError} />;
+            busy={busy === a.id} onApprove={() => void decide(a.id, 'approve')} onOpen={() => onOpen(a.goalId)} onDone={onDone} setError={setError} />;
         }
         return (
           <div key={a.id} className="box" style={{ marginTop: 12 }}>
@@ -46,6 +46,7 @@ export function Inbox({ approvals, goals, order, onDone, setError }: {
             <div className="row">
               <button disabled={busy === a.id} onClick={() => void decide(a.id, 'approve')}>{a.kind === 'deliver' ? 'APPROVE: PUSH + OPEN PR' : 'APPROVE: POST COMMENT'}</button>
               <button disabled={busy === a.id} onClick={() => void decide(a.id, 'deny')}>DENY</button>
+              <button onClick={() => onOpen(a.goalId)}>OPEN GOAL</button>
             </div>
           </div>
         );
@@ -55,8 +56,8 @@ export function Inbox({ approvals, goals, order, onDone, setError }: {
 }
 
 /** The plan gate: everything you need to say yes, with the exact hash that will be recorded. */
-function PlanCard({ approval, summary: p, title, busy, onApprove, onDone, setError }: {
-  approval: Approval; summary: PlanSummary; title: string; busy: boolean; onApprove: () => void; onDone: () => void; setError: (m: string | null) => void;
+function PlanCard({ approval, summary: p, title, busy, onApprove, onOpen, onDone, setError }: {
+  approval: Approval; summary: PlanSummary; title: string; busy: boolean; onApprove: () => void; onOpen: () => void; onDone: () => void; setError: (m: string | null) => void;
 }) {
   const [mode, setMode] = useState<'view' | 'reject' | 'edit'>('view');
   const [text, setText] = useState('');
@@ -102,6 +103,7 @@ function PlanCard({ approval, summary: p, title, busy, onApprove, onDone, setErr
           <button disabled={busy || working} onClick={onApprove}>APPROVE PLAN</button>
           <button disabled={busy || working} onClick={() => setMode('reject')}>REJECT WITH FEEDBACK</button>
           <button disabled={busy || working} onClick={() => void startEdit()}>EDIT</button>
+          <button onClick={onOpen}>OPEN GOAL</button>
         </div>
       )}
       {mode === 'reject' && (
@@ -129,8 +131,8 @@ function PlanCard({ approval, summary: p, title, busy, onApprove, onDone, setErr
 }
 
 /** Things the scheduler could not decide for itself. */
-export function Escalations({ escalations, goals, onDone, setError }: {
-  escalations: Escalation[]; goals: Goal[]; onDone: () => void; setError: (m: string | null) => void;
+export function Escalations({ escalations, goals, onOpen, onDone, setError }: {
+  escalations: Escalation[]; goals: Goal[]; onOpen: (goalId: string, beadId?: string) => void; onDone: () => void; setError: (m: string | null) => void;
 }) {
   const resolve = async (id: string) => {
     setError(null);
@@ -143,6 +145,7 @@ export function Escalations({ escalations, goals, onDone, setError }: {
         <div key={e.id} className="row">
           <span className="amber">! {e.reason.replace(/_/g, ' ')}</span>
           <span>{goals.find((g) => g.id === e.goalId)?.title ?? e.goalId}{e.beadId ? ` / ${e.beadId}` : ''}: {e.message}</span>
+          <button onClick={() => onOpen(e.goalId, e.beadId ?? undefined)}>OPEN</button>
           <button onClick={() => void resolve(e.id)}>DISMISS</button>
         </div>
       ))}

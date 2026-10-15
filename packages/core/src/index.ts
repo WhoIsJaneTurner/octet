@@ -18,3 +18,8 @@ export * from './plan.ts';
 export * from './vault.ts';
 export * from './planning.ts';
 export * from './scheduler.ts';
+export * from './usage.ts';
+export * from './runlog.ts';
+export * from './claude-stream.ts';
+export * from './cleanup.ts';
+export * from './doctor.ts';

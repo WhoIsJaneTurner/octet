@@ -2,6 +2,8 @@ import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes } from 'node:crypto';
+import { redactDeep } from './redact.ts';
+import { emptyTotals, type RunUsage, type UsageSummary, type UsageTotals } from './usage.ts';
 
 /** `delivered` = PR open and waiting on review; `done` = PR merged. Only `active` counts toward the goal cap. */
 export type GoalStatus = 'planning' | 'plan_ready' | 'active' | 'delivered' | 'done' | 'failed';
@@ -100,6 +102,10 @@ export interface BeadRun {
   endedAt: string | null;
   endReason: string | null;
   cancelRequested: boolean;
+  /** `review` runs are Reviewer runs on an `in_review` bead; they share the heartbeat and cancel mechanism. */
+  kind: 'engineer' | 'review';
+  /** Token and cost data, when the runner reported any. */
+  usage?: RunUsage;
 }
 
 export type RequestSource = 'ui' | 'cli' | 'github' | 'jira' | 'chat';
@@ -216,6 +222,17 @@ export const MIGRATIONS: ((db: Db) => void)[] = [
   },
   // 3: a goal can be paused
   (db) => addColumn(db, 'goals', 'paused', 'INTEGER NOT NULL DEFAULT 0'),
+  // 4: runs carry their kind (engineer or review) and the token/cost data the agent reported
+  (db) => {
+    addColumn(db, 'bead_runs', 'kind', "TEXT NOT NULL DEFAULT 'engineer'");
+    addColumn(db, 'bead_runs', 'input_tokens', 'INTEGER');
+    addColumn(db, 'bead_runs', 'output_tokens', 'INTEGER');
+    addColumn(db, 'bead_runs', 'cache_read_tokens', 'INTEGER');
+    addColumn(db, 'bead_runs', 'cache_creation_tokens', 'INTEGER');
+    addColumn(db, 'bead_runs', 'cost_usd', 'REAL');
+    addColumn(db, 'bead_runs', 'num_turns', 'INTEGER');
+    addColumn(db, 'bead_runs', 'model', 'TEXT');
+  },
 ];
 
 /** Events are chained: each hash covers the previous hash plus the event's own fields. */
@@ -252,6 +269,16 @@ const toRun = (r: Row): BeadRun => ({
   id: r.id as number, beadId: r.bead_id as string, n: r.n as number, pid: r.pid as number, host: r.host as string,
   startedAt: r.started_at as string, heartbeatAt: r.heartbeat_at as string, endedAt: r.ended_at as string | null,
   endReason: r.end_reason as string | null, cancelRequested: r.cancel_requested === 1,
+  kind: r.kind === 'review' ? 'review' : 'engineer',
+  ...(r.input_tokens !== null && r.input_tokens !== undefined || r.cost_usd !== null && r.cost_usd !== undefined ? {
+    usage: {
+      inputTokens: Number(r.input_tokens ?? 0), outputTokens: Number(r.output_tokens ?? 0),
+      cacheReadTokens: Number(r.cache_read_tokens ?? 0), cacheCreationTokens: Number(r.cache_creation_tokens ?? 0),
+      ...(r.cost_usd !== null && r.cost_usd !== undefined ? { costUsd: Number(r.cost_usd) } : {}),
+      ...(r.num_turns !== null && r.num_turns !== undefined ? { numTurns: Number(r.num_turns) } : {}),
+      ...(typeof r.model === 'string' ? { model: r.model } : {}),
+    },
+  } : {}),
 });
 
 const toRequest = (r: Row): Request => ({
@@ -454,6 +481,18 @@ export class Store {
     this.changed();
   }
 
+  /** Changes a bead's title or brief. The caller decides when that is allowed. */
+  updateBead(id: string, patch: { title?: string; brief?: string }): void {
+    this.db.prepare('UPDATE beads SET title = COALESCE(?, title), brief = COALESCE(?, brief), updated_at = ? WHERE id = ?')
+      .run(patch.title ?? null, patch.brief ?? null, now(), id);
+    this.changed();
+  }
+
+  deleteBead(id: string): void {
+    this.db.prepare('DELETE FROM beads WHERE id = ?').run(id);
+    this.changed();
+  }
+
   insertRequest(r: Omit<Request, 'id' | 'createdAt' | 'rejectReason' | 'goalId'>): Request {
     const req: Request = { ...r, id: newId('req'), rejectReason: null, goalId: null, createdAt: now() };
     this.db
@@ -491,12 +530,12 @@ export class Store {
   }
 
   /** Registers a run owned by this process. Returns it with its run number. */
-  startRun(beadId: string, pid: number, host: string): BeadRun {
-    const n = Number((this.db.prepare('SELECT COUNT(*) AS n FROM bead_runs WHERE bead_id = ?').get(beadId) as Row).n) + 1;
+  startRun(beadId: string, pid: number, host: string, kind: BeadRun['kind'] = 'engineer'): BeadRun {
+    const n = Number((this.db.prepare('SELECT COUNT(*) AS n FROM bead_runs WHERE bead_id = ? AND kind = ?').get(beadId, kind) as Row).n) + 1;
     const t = now();
     const res = this.db
-      .prepare('INSERT INTO bead_runs (bead_id, n, pid, host, started_at, heartbeat_at) VALUES (?,?,?,?,?,?)')
-      .run(beadId, n, pid, host, t, t);
+      .prepare('INSERT INTO bead_runs (bead_id, n, pid, host, started_at, heartbeat_at, kind) VALUES (?,?,?,?,?,?,?)')
+      .run(beadId, n, pid, host, t, t, kind);
     this.changed();
     return toRun(this.db.prepare('SELECT * FROM bead_runs WHERE id = ?').get(Number(res.lastInsertRowid)) as Row);
   }
@@ -513,9 +552,9 @@ export class Store {
     this.changed();
   }
 
-  /** Flags the bead's open run for cancellation. Returns false when it has none. */
-  requestCancel(beadId: string): boolean {
-    const res = this.db.prepare('UPDATE bead_runs SET cancel_requested = 1 WHERE bead_id = ? AND ended_at IS NULL').run(beadId);
+  /** Flags the bead's open run of that kind for cancellation. Returns false when it has none. */
+  requestCancel(beadId: string, kind: BeadRun['kind'] = 'engineer'): boolean {
+    const res = this.db.prepare('UPDATE bead_runs SET cancel_requested = 1 WHERE bead_id = ? AND kind = ? AND ended_at IS NULL').run(beadId, kind);
     this.changed();
     return Number(res.changes) > 0;
   }
@@ -528,15 +567,54 @@ export class Store {
   /** Engineer runs started for all beads of a goal (the scheduler's cost ceiling counts these). */
   countRunsForGoal(goalId: string): number {
     const r = this.db
-      .prepare('SELECT COUNT(*) AS n FROM bead_runs WHERE bead_id IN (SELECT id FROM beads WHERE goal_id = ?)')
+      .prepare("SELECT COUNT(*) AS n FROM bead_runs WHERE kind = 'engineer' AND bead_id IN (SELECT id FROM beads WHERE goal_id = ?)")
       .get(goalId) as Row;
     return Number(r.n);
   }
 
-  /** Latest run for a bead, if any. */
+  /** Latest engineer run for a bead, if any (its number names the output log). */
   lastRun(beadId: string): BeadRun | undefined {
-    const r = this.db.prepare('SELECT * FROM bead_runs WHERE bead_id = ? ORDER BY id DESC LIMIT 1').get(beadId) as Row | undefined;
+    const r = this.db.prepare("SELECT * FROM bead_runs WHERE bead_id = ? AND kind = 'engineer' ORDER BY id DESC LIMIT 1").get(beadId) as Row | undefined;
     return r && toRun(r);
+  }
+
+  /** Records what the agent reported for a run. Safe to call with partial data. */
+  setRunUsage(runId: number, u: RunUsage): void {
+    this.db.prepare(`UPDATE bead_runs SET input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_creation_tokens = ?,
+      cost_usd = ?, num_turns = ?, model = ? WHERE id = ?`)
+      .run(u.inputTokens, u.outputTokens, u.cacheReadTokens, u.cacheCreationTokens, u.costUsd ?? null, u.numTurns ?? null, u.model ?? null, runId);
+    this.changed();
+  }
+
+  /** Totals for runs started on the current local day. */
+  usageToday(): UsageTotals {
+    return this.totals("WHERE date(started_at, 'localtime') = date('now', 'localtime')")[0] ?? emptyTotals();
+  }
+
+  private totals(where: string, groupBy = '', tail = ''): (UsageTotals & { key?: string })[] {
+    const rows = this.db.prepare(`SELECT ${groupBy ? `${groupBy} AS key,` : ''} COUNT(*) AS runs,
+      COALESCE(SUM(input_tokens), 0) AS i, COALESCE(SUM(output_tokens), 0) AS o, COALESCE(SUM(cache_read_tokens), 0) AS cr,
+      COALESCE(SUM(cache_creation_tokens), 0) AS cc, COALESCE(SUM(cost_usd), 0) AS cost
+      FROM bead_runs ${where} ${groupBy ? `GROUP BY ${groupBy}` : ''} ${tail}`).all() as Row[];
+    return rows.map((r) => ({
+      ...(r.key !== undefined ? { key: String(r.key) } : {}), runs: Number(r.runs), inputTokens: Number(r.i), outputTokens: Number(r.o),
+      cacheReadTokens: Number(r.cr), cacheCreationTokens: Number(r.cc), costUsd: Number(r.cost),
+    }));
+  }
+
+  /** Token and cost totals per bead, per goal and per local day, across engineer and review runs. */
+  usageSummary(): UsageSummary {
+    const byBead: Record<string, UsageTotals> = {};
+    for (const { key, ...t } of this.totals('', 'bead_id')) byBead[key!] = t;
+    const owner = new Map(this.listBeads().map((b) => [b.id, b.goalId]));
+    const byGoal: Record<string, UsageTotals> = {};
+    const total = emptyTotals();
+    for (const [beadId, t] of Object.entries(byBead)) {
+      const g = (byGoal[owner.get(beadId) ?? '(deleted)'] ??= emptyTotals());
+      for (const k of Object.keys(t) as (keyof UsageTotals)[]) { g[k] += t[k]; total[k] += t[k]; }
+    }
+    const byDay = this.totals('', "date(started_at, 'localtime')", 'ORDER BY key DESC LIMIT 30').map(({ key, ...t }) => ({ day: key!, ...t }));
+    return { today: this.usageToday(), byDay, byBead, byGoal, total };
   }
 
   /** Hash of the newest chained event, or '' if the chain is empty. */
@@ -546,9 +624,14 @@ export class Store {
   }
 
   log(e: { kind: string; goalId?: string; beadId?: string; seat?: string; data?: unknown }): void {
+    // Redact before hashing: the chain covers what is stored, so a secret never reaches the log or the hash input.
+    const { value, count } = redactDeep(e.data ?? {});
+    const data = count && value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...value, redacted: count + (typeof (value as { redacted?: unknown }).redacted === 'number' ? (value as { redacted: number }).redacted : 0) }
+      : value;
     const row = {
       ts: now(), kind: e.kind, goalId: e.goalId ?? null, beadId: e.beadId ?? null,
-      seat: e.seat ?? null, data: JSON.stringify(e.data ?? {}),
+      seat: e.seat ?? null, data: JSON.stringify(data),
     };
     const prev = this.chainHead();
     this.db

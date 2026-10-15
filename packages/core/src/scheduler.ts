@@ -1,6 +1,7 @@
 import { DEFAULT_LIMITS, DEFAULT_PLANNING, DEFAULT_REVIEW } from './config.ts';
 import { approveBead, requestDelivery, type Ctx } from './orchestrate.ts';
 import { autonomyOf } from './project.ts';
+import { usageHold } from './usage.ts';
 import type { Bead, Escalation, Goal } from './store.ts';
 
 /** What the scheduler wants done. Pure data, so the decision logic can be tested without running anything. */
@@ -20,7 +21,7 @@ export interface SchedHooks {
 /** Bead-scoped escalations clear themselves once the bead leaves the state that caused them. */
 const CLEARS_WHEN_NOT: Record<string, Bead['status'][]> = {
   bead_failed: ['failed'], cancelled: ['failed'], review_inconclusive: ['in_review'], review_rounds: ['in_review'],
-  review_error: ['in_review'], action_failed: ['todo', 'changes_requested', 'failed', 'in_review'], cap_wait: ['todo', 'changes_requested', 'failed'], merge_conflict: ['in_review'],
+  review_error: ['in_review'], review_cancelled: ['in_review'], action_failed: ['todo', 'changes_requested', 'failed', 'in_review'], cap_wait: ['todo', 'changes_requested', 'failed'], merge_conflict: ['in_review'],
 };
 
 const eventId = (ctx: Ctx, kind: string, beadId: string): number => ctx.store.lastEvent(kind, beadId)?.id ?? 0;
@@ -76,6 +77,11 @@ export function decide(ctx: Ctx, hooks: SchedHooks, now = Date.now()): SchedActi
         const verdict = ctx.store.lastEvent('review.verdict', b.id);
         const reviewed = !!verdict && verdict.id > ready;
         if (!reviewed) {
+          if (eventId(ctx, 'review.cancelled', b.id) > ready) {
+            escalate('review_cancelled', `You cancelled the review of "${b.title}". Review it again, or merge it or send it back yourself.`, b);
+            waitingOnHuman = true;
+            continue;
+          }
           const errors = ctx.store.db
             .prepare("SELECT COUNT(*) AS n FROM events WHERE kind = 'review.error' AND bead_id = ? AND id > ?").get(b.id, ready) as { n: number };
           if (errors.n >= 2) { escalate('review_error', `The Reviewer failed twice on "${b.title}".`, b); waitingOnHuman = true; }
@@ -144,6 +150,7 @@ function clearResolved(ctx: Ctx): void {
     const need = CLEARS_WHEN_NOT[e.reason];
     const bead = e.beadId ? ctx.store.getBead(e.beadId) : undefined;
     if (need && bead && !need.includes(bead.status)) ctx.store.resolveEscalation(e.id);
+    if (e.reason === 'review_cancelled' && bead && eventId(ctx, 'review.verdict', bead.id) > eventId(ctx, 'review.cancelled', bead.id)) ctx.store.resolveEscalation(e.id);
     if (e.reason === 'idle' && ctx.store.listBeads(goal.id).some((b) => b.status === 'running' || b.status === 'in_review')) ctx.store.resolveEscalation(e.id);
   }
 }
@@ -151,7 +158,9 @@ function clearResolved(ctx: Ctx): void {
 /** One scheduler pass: decide, then act. Safe to call as often as you like; it only reads durable state. */
 export function tick(ctx: Ctx, hooks: SchedHooks, exec: TickExec): SchedAction[] {
   clearResolved(ctx);
-  const actions = decide(ctx, hooks);
+  // The daily ceiling from [usage]: no new engineer or reviewer runs until it clears. Merges and deliveries still happen.
+  const held = usageHold(ctx);
+  const actions = decide(ctx, hooks).filter((a) => !held || (a.type !== 'run' && a.type !== 'review'));
   for (const a of actions) {
     try {
       if (a.type === 'run') exec.run(a.beadId);

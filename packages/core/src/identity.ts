@@ -140,11 +140,14 @@ export function checkRemote(id: Identity, url: string): RemoteCheck {
   };
 }
 
+/** The `ssh` arguments that make GitHub greet the account this identity's key belongs to. */
+export const sshProbeArgs = (id: Identity): string[] => ['-T', '-i', id.sshKey, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
+  '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new', 'git@github.com'];
+
 /** Asks GitHub which user this identity's SSH key authenticates as. */
 export function sshWhoAmI(id: Identity): string | null {
   try {
-    execFileSync('ssh', ['-T', '-i', id.sshKey, '-o', 'IdentitiesOnly=yes', '-o', 'BatchMode=yes',
-      '-o', 'StrictHostKeyChecking=accept-new', 'git@github.com'], {
+    execFileSync('ssh', sshProbeArgs(id), {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });

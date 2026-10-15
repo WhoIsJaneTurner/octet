@@ -35,12 +35,30 @@ export interface Forge {
   prDiff(url: string, identity: Identity): string;
 }
 
+/**
+ * A plain-language version of the common ways `gh` fails when it cannot see a pull request, or undefined to keep the
+ * raw message. The raw text still goes in the audit trail through the caller; this is what a person should read.
+ */
+export function friendlyGhError(stderr: string, identity: Identity): string | undefined {
+  if (/could not resolve to a (pullrequest|repository)|http 404|\bnot found\b|no pull requests? found/i.test(stderr)) {
+    return `Cannot reach that pull request as ${identity.id} (${identity.ghUser}). Check the URL, and that this account can see the repository (it may be private, or belong to another account). Try: octet identity doctor`;
+  }
+  if (/http 40[13]|bad credentials|authentication|gh auth login|token.*(expired|invalid)/i.test(stderr)) {
+    return `GitHub did not accept the login for ${identity.ghUser}. Run: gh auth login`;
+  }
+  if (/error connecting|could not resolve host|no such host|dial tcp|timed? ?out|network is unreachable/i.test(stderr)) {
+    return 'Cannot reach GitHub right now. Check your network connection and try again.';
+  }
+  return undefined;
+}
+
 function gh(args: string[], identity: Identity, cwd?: string): string {
   const env: Env = { ...childEnv(identity), GH_TOKEN: ghToken(identity) };
   try {
     return execFileSync('gh', args, { ...(cwd ? { cwd } : {}), env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 32 * 1024 * 1024 });
   } catch (e) {
-    throw new OctetError(`gh ${args.slice(0, 2).join(' ')} failed: ${String((e as { stderr?: unknown }).stderr ?? (e as Error).message).trim()}`);
+    const stderr = String((e as { stderr?: unknown }).stderr ?? (e as Error).message).trim();
+    throw new OctetError(friendlyGhError(stderr, identity) ?? `gh ${args.slice(0, 2).join(' ')} failed: ${stderr}`);
   }
 }
 

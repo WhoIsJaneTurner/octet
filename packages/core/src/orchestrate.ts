@@ -1,7 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DEFAULT_LIMITS, DEFAULT_REVIEW, type Limits, type PlanningConfig, type ReviewConfig } from './config.ts';
+import { DEFAULT_LIMITS, DEFAULT_REVIEW, type Limits, type PlanningConfig, type ReviewConfig, type UsageConfig } from './config.ts';
 import { decidePlanApproval } from './planning.ts';
 import { GitHubForge, prNumber, type Forge } from './forge.ts';
 import { OctetError } from './errors.ts';
@@ -15,6 +15,9 @@ import { getProject, type Project } from './project.ts';
 import type { AgentRunner } from './runner.ts';
 import { newId, OPEN_GOAL_STATUSES, type Approval, type Bead, type Goal, type PullRequest, type Store } from './store.ts';
 import { evaluate } from './warden.ts';
+import { redact } from './redact.ts';
+import { RunLogWriter } from './runlog.ts';
+import { cleanupGoal } from './cleanup.ts';
 
 export interface Ctx {
   store: Store;
@@ -24,6 +27,8 @@ export interface Ctx {
   limits?: Limits;
   review?: ReviewConfig;
   planning?: PlanningConfig;
+  /** Optional daily ceiling for the scheduler (`[usage]` in config.toml). */
+  usage?: UsageConfig;
   forge?: Forge;
   /** Where engineer output is kept, one file per run: `<runsDir>/<bead>/<n>.log`. Unset = not persisted. */
   runsDir?: string;
@@ -34,11 +39,11 @@ export interface Ctx {
 const HEARTBEAT_MS = 5000;
 /** A run whose heartbeat is older than this has no live owner. */
 const STALE_MS = 30_000;
-/** One run's log stops growing here; the tail keeps the end of the story. */
-const MAX_LOG_BYTES = 2_000_000;
 
 /** In-process handles for runs this process owns, so a cancel takes effect at once instead of at the next heartbeat. */
 const localRuns = new Map<string, AbortController>();
+/** The same for Reviewer runs this process owns. */
+const localReviews = new Map<string, AbortController>();
 
 function projectOf(ctx: Ctx, name: string): { project: Project; identity: Identity } {
   const project = getProject(ctx.projects, name);
@@ -152,6 +157,7 @@ export async function runBead(
   if (blocked.length) throw new OctetError(`Bead ${beadId} is waiting on: ${blocked.join(', ')}`);
 
   const goal = ctx.store.getGoal(bead.goalId)!;
+  if (goal.status === 'failed') throw new OctetError(`Goal ${goal.id} was abandoned; its beads cannot run`);
   const { project, identity } = projectOf(ctx, goal.project);
   const verdict = evaluate({ seat: 'engineer', kind: 'fs.write', identity });
   if (verdict.decision !== 'allow') throw new OctetError(`Warden: ${verdict.reason}`);
@@ -182,16 +188,10 @@ export async function runBead(
   }, ctx.heartbeatMs ?? HEARTBEAT_MS);
   beat.unref();
 
-  let logged = 0;
-  const logFile = ctx.runsDir ? runLogPath(ctx.runsDir, bead.id, run.n) : undefined;
-  if (logFile) mkdirSync(join(logFile, '..'), { recursive: true });
+  // The log is written redacted (see runlog.ts); the live stream to the UI is not persisted anywhere.
+  const logWriter = ctx.runsDir ? new RunLogWriter(runLogPath(ctx.runsDir, bead.id, run.n)) : undefined;
   const record = (text: string) => {
-    if (logFile && logged < MAX_LOG_BYTES) {
-      const room = MAX_LOG_BYTES - logged;
-      const part = text.length > room ? `${text.slice(0, room)}\n[log truncated]\n` : text;
-      try { appendFileSync(logFile, part); } catch { /* a full disk must not kill the run */ }
-      logged += text.length;
-    }
+    logWriter?.write(text);
     onChunk?.(text);
   };
 
@@ -203,6 +203,7 @@ export async function runBead(
       },
       record,
     );
+    if (result.usage) ctx.store.setRunUsage(run.id, result.usage);
 
     // A stopped run keeps its worktree as it is; a re-run picks up from there.
     const stopped = result.cancelled ? 'cancelled' : result.timedOut ? 'timeout' : undefined;
@@ -236,6 +237,8 @@ export async function runBead(
     clearInterval(beat);
     opts.signal?.removeEventListener('abort', relay);
     localRuns.delete(bead.id);
+    logWriter?.close();
+    if (logWriter?.redacted) ctx.store.log({ kind: 'run.redacted', goalId: goal.id, beadId: bead.id, seat: 'engineer', data: { run: run.n, redacted: logWriter.redacted } });
   }
 }
 
@@ -247,6 +250,8 @@ export function cancelBead(ctx: Ctx, beadId: string): boolean {
   const bead = ctx.store.getBead(beadId);
   if (!bead) throw new OctetError(`Unknown bead "${beadId}"`);
   reconcileRunning(ctx.store);
+  // An in_review bead has no engineer; a cancel means its Reviewer run.
+  if (ctx.store.getBead(beadId)!.status === 'in_review') return cancelReview(ctx, beadId);
   if (ctx.store.getBead(beadId)!.status !== 'running') {
     throw new OctetError(`Bead ${beadId} is ${ctx.store.getBead(beadId)!.status}, not running`);
   }
@@ -254,6 +259,23 @@ export function cancelBead(ctx: Ctx, beadId: string): boolean {
   ctx.store.log({ kind: 'bead.cancel_requested', goalId: bead.goalId, beadId, seat: 'engineer' });
   const local = localRuns.get(beadId);
   if (local) { local.abort(); return true; }
+  return true;
+}
+
+/**
+ * Stops a Reviewer run, the same way `cancelBead` stops an engineer: this process aborts at once, another process
+ * sees the flag at its next heartbeat. The bead stays `in_review`; you can review it again, merge it or send it back.
+ */
+export function cancelReview(ctx: Ctx, beadId: string): boolean {
+  const bead = ctx.store.getBead(beadId);
+  if (!bead) throw new OctetError(`Unknown bead "${beadId}"`);
+  reconcileRunning(ctx.store);
+  if (!ctx.store.openRuns().some((r) => r.beadId === beadId && r.kind === 'review')) {
+    throw new OctetError(`Bead ${beadId} has no review running`);
+  }
+  ctx.store.requestCancel(beadId, 'review');
+  ctx.store.log({ kind: 'review.cancel_requested', goalId: bead.goalId, beadId, seat: 'reviewer' });
+  localReviews.get(beadId)?.abort();
   return true;
 }
 
@@ -434,10 +456,12 @@ export function parseVerdict(output: string): { verdict: Verdict; feedback: stri
  * the Engineer; approve is a recommendation unless `review.autoMerge` lets the Marshal merge it.
  * The diff is untrusted data. After `maxRounds` rejections the bead is left for the human.
  */
-export async function reviewBead(ctx: Ctx, beadId: string): Promise<{ verdict: Verdict; feedback: string; bead: Bead }> {
+export async function reviewBead(ctx: Ctx, beadId: string): Promise<{ verdict: Verdict; feedback: string; bead: Bead; cancelled?: boolean }> {
   const bead = ctx.store.getBead(beadId);
   if (!bead) throw new OctetError(`Unknown bead "${beadId}"`);
   if (bead.status !== 'in_review') throw new OctetError(`Bead ${beadId} is ${bead.status}, not in_review`);
+  reconcileRunning(ctx.store);
+  if (ctx.store.openRuns().some((r) => r.beadId === beadId && r.kind === 'review')) throw new OctetError(`Bead ${beadId} is already being reviewed`);
   const cfg = ctx.review ?? DEFAULT_REVIEW;
   const goal = ctx.store.getGoal(bead.goalId)!;
   const { identity } = projectOf(ctx, goal.project);
@@ -450,10 +474,34 @@ export async function reviewBead(ctx: Ctx, beadId: string): Promise<{ verdict: V
     '```diff', diff.length > DIFF_CAP ? `${diff.slice(0, DIFF_CAP)}\n[diff truncated]` : diff, '```',
   ].join('\n');
 
-  ctx.store.log({ kind: 'review.started', goalId: goal.id, beadId, seat: 'reviewer' });
-  const result = await ctx.runner.run(
-    { seat: 'reviewer', cwd: bead.worktree, prompt, systemPrompt: loadPersona('reviewer'), env: childEnv(identity), readOnly: true },
-  );
+  // A review is a run too: it has a row (heartbeat, cancel flag, usage) so it can be seen and stopped from any process.
+  const run = ctx.store.startRun(bead.id, process.pid, hostname(), 'review');
+  ctx.store.log({ kind: 'review.started', goalId: goal.id, beadId, seat: 'reviewer', data: { run: run.n } });
+  const abort = new AbortController();
+  localReviews.set(bead.id, abort);
+  const beat = setInterval(() => {
+    try { if (ctx.store.heartbeat(run.id)) abort.abort(); } catch { /* database busy; the next beat retries */ }
+  }, ctx.heartbeatMs ?? HEARTBEAT_MS);
+  beat.unref();
+  let result;
+  try {
+    result = await ctx.runner.run(
+      { seat: 'reviewer', cwd: bead.worktree, prompt, systemPrompt: loadPersona('reviewer'), env: childEnv(identity), readOnly: true, signal: abort.signal },
+    );
+  } catch (e) {
+    ctx.store.endRun(run.id, 'error');
+    throw e;
+  } finally {
+    clearInterval(beat);
+    localReviews.delete(bead.id);
+  }
+  if (result.usage) ctx.store.setRunUsage(run.id, result.usage);
+  if (result.cancelled) {
+    ctx.store.endRun(run.id, 'cancelled');
+    ctx.store.log({ kind: 'review.cancelled', goalId: goal.id, beadId, seat: 'reviewer', data: { reason: 'cancelled', run: run.n, durationMs: result.durationMs, tail: result.output.slice(-2000) } });
+    return { verdict: 'inconclusive', feedback: 'The review was cancelled.', bead: ctx.store.getBead(beadId)!, cancelled: true };
+  }
+  ctx.store.endRun(run.id, result.exitCode === 0 ? 'completed' : 'failed');
   const parsed = result.exitCode === 0 ? parseVerdict(result.output) : { verdict: 'inconclusive' as const, feedback: result.output.slice(-2000) };
   ctx.store.log({ kind: 'review.verdict', goalId: goal.id, beadId, seat: 'reviewer', data: { verdict: parsed.verdict, feedback: parsed.feedback.slice(0, 4000) } });
 
@@ -515,7 +563,11 @@ export function refreshPr(ctx: Ctx, goalId: string): PullRequest | undefined {
     ctx.store.log({ kind: 'pr.changed', goalId, seat: 'courier', data: { url: pr.url, from: { state: pr.state, review: pr.reviewDecision, checks: pr.checks }, to: status } });
   }
   const next = ctx.store.upsertPr({ goalId, url: pr.url, number: pr.number, ...status });
-  if (status.state === 'MERGED' && goal.status !== 'done') ctx.store.setGoalStatus(goalId, 'done');
+  if (status.state === 'MERGED' && goal.status !== 'done') {
+    ctx.store.setGoalStatus(goalId, 'done');
+    // The PR is merged, so the worktrees have done their job. Branches stay.
+    try { cleanupGoal(ctx, goalId); } catch { /* gc will pick up stragglers */ }
+  }
   if (status.state === 'OPEN' && goal.status === 'done') ctx.store.setGoalStatus(goalId, 'delivered');
   return next;
 }
@@ -571,7 +623,8 @@ export async function requestPrecomment(ctx: Ctx, goalId: string): Promise<Appro
   const parsed = parseVerdict(result.output);
   ctx.store.log({ kind: 'review.verdict', goalId, seat: 'reviewer', data: { verdict: parsed.verdict, scope: 'pull request' } });
 
-  const body = `${COMMENT_HEADER}\n\nVerdict: ${parsed.verdict.replace('_', ' ')}\n\n${parsed.feedback}`;
+  // This text is posted to GitHub once you approve it, so a secret the Reviewer echoed from the diff must not go with it.
+  const body = redact(`${COMMENT_HEADER}\n\nVerdict: ${parsed.verdict.replace('_', ' ')}\n\n${parsed.feedback}`).text;
   const approval = ctx.store.insertApproval({
     kind: 'comment', goalId,
     summary: { action: 'Post an automated pre-review comment on the pull request (not an approval)', identity: identity.id, account: identity.ghUser, remote, pr: pr.url, body },
@@ -599,7 +652,13 @@ export async function reviewExternalPr(
   ].join('\n');
   const cwd = mkdtempSync(join(tmpdir(), 'octet-pr-review-'));
   ctx.store.log({ kind: 'review.external.started', seat: 'reviewer', data: { url: input.url, identity: identity.id } });
-  const result = await ctx.runner.run({ seat: 'reviewer', cwd, prompt, systemPrompt: loadPersona('reviewer'), env: childEnv(identity), readOnly: true });
+  let result;
+  try {
+    result = await ctx.runner.run({ seat: 'reviewer', cwd, prompt, systemPrompt: loadPersona('reviewer'), env: childEnv(identity), readOnly: true });
+  } finally {
+    // One temp directory per call; it holds nothing worth keeping.
+    rmSync(cwd, { recursive: true, force: true });
+  }
   const parsed = result.exitCode === 0 ? parseVerdict(result.output) : { verdict: 'inconclusive' as const, feedback: result.output.slice(-2000) };
   ctx.store.log({ kind: 'review.external.verdict', seat: 'reviewer', data: { url: input.url, verdict: parsed.verdict } });
   return parsed;

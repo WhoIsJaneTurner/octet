@@ -3,6 +3,8 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Env } from './git.ts';
 import type { SeatId } from './seats.ts';
+import { ClaudeStream } from './claude-stream.ts';
+import type { RunUsage } from './usage.ts';
 
 export interface RunRequest {
   seat: SeatId;
@@ -27,6 +29,8 @@ export interface RunResult {
   cancelled?: boolean;
   /** Stopped because `timeoutMs` elapsed. */
   timedOut?: boolean;
+  /** Tokens and estimated cost, when the agent reported them. Runners without this simply omit it. */
+  usage?: RunUsage;
 }
 
 export interface AgentRunner {
@@ -42,6 +46,8 @@ export class ClaudeCodeRunner implements AgentRunner {
   run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
     const args = [
       '-p',
+      // One JSON object per line: live text plus a closing `result` with token counts and cost (see claude-stream.ts).
+      '--output-format', 'stream-json', '--verbose',
       '--append-system-prompt', req.systemPrompt,
       // Builders get no MCP servers: account-level connectors are irrelevant to them and add noise.
       '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
@@ -56,6 +62,8 @@ export class ClaudeCodeRunner implements AgentRunner {
       // Own process group, so a kill reaches everything the agent started, not just `claude`.
       const child = spawn('claude', args, { cwd: req.cwd, env: req.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
       let output = '';
+      let stderrText = '';
+      const stream = new ClaudeStream((s) => { output += s; onChunk?.(s); });
       let cancelled = false;
       let timedOut = false;
       let killTimer: NodeJS.Timeout | undefined;
@@ -78,16 +86,24 @@ export class ClaudeCodeRunner implements AgentRunner {
       const take = (b: Buffer) => {
         const s = b.toString();
         output += s;
+        stderrText += s;
         onChunk?.(s);
       };
-      child.stdout.on('data', take);
+      child.stdout.on('data', (b: Buffer) => stream.feed(b.toString()));
       child.stderr.on('data', take);
       child.on('error', (e) => { cleanup(); reject(e); });
       child.on('close', (code) => {
         cleanup();
         // Anything left in the group after the leader exits is cleaned up too.
         killGroup('SIGKILL');
-        resolve({ exitCode: code ?? 1, output, durationMs: Date.now() - started, ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}) });
+        stream.end();
+        const usage = stream.usage;
+        resolve({
+          exitCode: code === 0 && stream.failed ? 1 : code ?? 1, durationMs: Date.now() - started,
+          // The final answer (what the Reviewer's verdict is read from), then anything the CLI wrote to stderr.
+          output: stream.result ? stream.answer + (stderrText ? `\n${stderrText}` : '') : output,
+          ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}), ...(usage ? { usage } : {}),
+        });
       });
       child.stdin.end(req.prompt);
     });
@@ -108,6 +124,8 @@ export class FakeRunner implements AgentRunner {
   readonly hang = new Set<SeatId>();
   /** Exit code to report per seat (default 0): lets a test make the engineer fail. */
   readonly exit = new Map<SeatId, number>();
+  /** Usage to report per seat, like Claude Code's closing `result` message. */
+  readonly usage = new Map<SeatId, RunUsage>();
   async run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
     this.calls.push(req);
     if (this.hang.has(req.seat)) {
@@ -126,6 +144,7 @@ export class FakeRunner implements AgentRunner {
     if (req.seat === 'engineer') writeFileSync(join(req.cwd, `${req.seat}-output.txt`), req.prompt);
     const output = this.queues.get(req.seat)?.shift() ?? this.replies[req.seat] ?? 'fake run complete\n';
     onChunk?.(output);
-    return { exitCode: this.exit.get(req.seat) ?? 0, output, durationMs: 1 };
+    const usage = this.usage.get(req.seat);
+    return { exitCode: this.exit.get(req.seat) ?? 0, output, durationMs: 1, ...(usage ? { usage } : {}) };
   }
 }
