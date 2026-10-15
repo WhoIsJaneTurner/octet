@@ -1,0 +1,15 @@
+# Copy to ~/.config/octet/identities.toml (or set OCTET_HOME) and fill in your own accounts.
+# Octet has no default identity: every project names exactly one.
+
+[identities.work]
+name    = "Your Name"
+email   = "you@company.com"
+ssh_key = "~/.ssh/id_ed25519_work"   # a key registered on that GitHub account only
+gh_user = "your-work-username"       # as shown by `gh auth status` (case matters)
+owners  = []                         # extra GitHub orgs this identity may push to
+
+[identities.personal]
+name    = "Your Name"
+email   = "you@example.com"
+ssh_key = "~/.ssh/id_ed25519_personal"
+gh_user = "your-personal-username"

@@ -1,0 +1,7 @@
+node_modules/
+.octet/
+*.db
+*.log
+.DS_Store
+local/
+dist/

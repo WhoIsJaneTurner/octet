@@ -1,0 +1,22 @@
+{
+  "name": "octet",
+  "private": true,
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "description": "Octet: an eight-seat council of AI coding agents, run locally.",
+  "repository": { "type": "git", "url": "git+ssh://git@github.com/WhoIsJaneTurner/octet.git" },
+  "engines": { "node": ">=24" },
+  "type": "module",
+  "scripts": {
+    "octet": "node packages/cli/src/main.ts",
+    "daemon": "node packages/daemon/src/main.ts",
+    "ui:build": "pnpm --filter @octet/ui build",
+    "start": "pnpm ui:build && node packages/daemon/src/main.ts",
+    "test": "node --test \"packages/*/test/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
