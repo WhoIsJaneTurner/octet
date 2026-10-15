@@ -12,3 +12,6 @@ export * from './orchestrate.ts';
 export * from './config.ts';
 export * from './forge.ts';
 export * from './intake.ts';
+export * from './configcheck.ts';
+export * from './lock.ts';
+export * from './doctor.ts';

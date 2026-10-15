@@ -1,0 +1,13 @@
+{
+  "name": "@octet/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron shell for Octet. Not part of the pnpm workspace; see README.md.",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { parse } from 'smol-toml';
+import { checkIdentitiesDoc, enforce, parseToml } from './configcheck.ts';
 import { OctetError } from './errors.ts';
 import { identitiesFile } from './paths.ts';
 
@@ -28,8 +28,10 @@ function str(table: Record<string, unknown>, key: string, id: string): string {
   return v;
 }
 
-export function parseIdentities(text: string): Identity[] {
-  const doc = parse(text) as { identities?: Record<string, Record<string, unknown>> };
+export function parseIdentities(text: string, file: string = 'identities.toml'): Identity[] {
+  const parsed = parseToml(text, file);
+  enforce(file, checkIdentitiesDoc(parsed));
+  const doc = parsed as { identities?: Record<string, Record<string, unknown>> };
   const out: Identity[] = [];
   for (const [id, t] of Object.entries(doc.identities ?? {})) {
     const owners = Array.isArray(t.owners) ? t.owners.map(String) : [];
@@ -53,7 +55,7 @@ export function loadIdentities(file: string = identitiesFile()): Identity[] {
       `No identities file at ${file}. Copy identities.example.toml there and edit it.`,
     );
   }
-  return parseIdentities(readFileSync(file, 'utf8'));
+  return parseIdentities(readFileSync(file, 'utf8'), file);
 }
 
 /** There is deliberately no default identity: callers must name one. */
@@ -72,7 +74,7 @@ const STRIPPED_ENV = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GIT_AU
   'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_SSH_COMMAND'];
 
 /** Environment variables that pin git to one identity, independent of ~/.gitconfig. */
-export function gitEnv(id: Identity): Record<string, string> {
+export function gitEnv(id: Identity, base: NodeJS.ProcessEnv = process.env): Record<string, string> {
   return {
     GIT_AUTHOR_NAME: id.name,
     GIT_AUTHOR_EMAIL: id.email,
@@ -81,7 +83,29 @@ export function gitEnv(id: Identity): Record<string, string> {
     GIT_SSH_COMMAND: `ssh -i "${id.sshKey}" -o IdentitiesOnly=yes -o BatchMode=yes`,
     GIT_TERMINAL_PROMPT: '0',
     OCTET_IDENTITY: id.id,
+    ...signingEnv(id, base),
   };
+}
+
+/**
+ * SSH commit signing, only for an identity that sets `signing_key`. Passed as git config
+ * through the environment (GIT_CONFIG_COUNT and friends), appended after any entries already
+ * in `base`, so nothing is written to a repo or to ~/.gitconfig.
+ */
+export function signingEnv(id: Identity, base: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  if (!id.signingKey) return {};
+  const entries: [string, string][] = [
+    ['gpg.format', 'ssh'],
+    ['user.signingkey', id.signingKey],
+    ['commit.gpgsign', 'true'],
+  ];
+  const start = Number.parseInt(base.GIT_CONFIG_COUNT ?? '', 10) || 0;
+  const env: Record<string, string> = { GIT_CONFIG_COUNT: String(start + entries.length) };
+  entries.forEach(([k, v], i) => {
+    env[`GIT_CONFIG_KEY_${start + i}`] = k;
+    env[`GIT_CONFIG_VALUE_${start + i}`] = v;
+  });
+  return env;
 }
 
 /** Full environment for a child process: inherited env minus other identities' credentials. */
@@ -91,7 +115,7 @@ export function childEnv(
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
   for (const k of STRIPPED_ENV) delete env[k];
-  return { ...env, ...gitEnv(id) };
+  return { ...env, ...gitEnv(id, env) };
 }
 
 /** Fetches the gh token for this identity's account. Only the Courier should call this. */

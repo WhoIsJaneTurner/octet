@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { parse } from 'smol-toml';
+import { readConfigFile } from './configcheck.ts';
 import { octetHome } from './paths.ts';
 
 export interface Limits {
@@ -30,7 +30,7 @@ const positive = (v: unknown, fallback: number): number =>
 
 export function loadReview(file: string = join(octetHome(), 'config.toml')): ReviewConfig {
   if (!existsSync(file)) return { ...DEFAULT_REVIEW };
-  const r = (parse(readFileSync(file, 'utf8')) as { review?: Record<string, unknown> }).review ?? {};
+  const r = (readConfigFile('config', file) as { review?: Record<string, unknown> }).review ?? {};
   return {
     auto: r.auto === true,
     autoMerge: r.auto_merge === true,
@@ -41,7 +41,7 @@ export function loadReview(file: string = join(octetHome(), 'config.toml')): Rev
 /** Reads `[limits]` from ~/.config/octet/config.toml. Missing file or keys use defaults. */
 export function loadLimits(file: string = join(octetHome(), 'config.toml')): Limits {
   if (!existsSync(file)) return { ...DEFAULT_LIMITS };
-  const doc = parse(readFileSync(file, 'utf8')) as { limits?: Record<string, unknown> };
+  const doc = readConfigFile('config', file) as { limits?: Record<string, unknown> };
   return {
     maxEngineers: positive(doc.limits?.max_engineers, DEFAULT_LIMITS.maxEngineers),
     maxActiveGoals: positive(doc.limits?.max_active_goals, DEFAULT_LIMITS.maxActiveGoals),

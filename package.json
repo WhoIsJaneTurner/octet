@@ -13,6 +13,7 @@
     "ui:build": "pnpm --filter @octet/ui build",
     "start": "pnpm ui:build && node packages/daemon/src/main.ts",
     "test": "node --test \"packages/*/test/*.test.ts\"",
+    "check": "node scripts/check.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.json"
   },
   "devDependencies": {

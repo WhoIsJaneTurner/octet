@@ -4,6 +4,7 @@ import {
   addBead, addProject, approveBead, cancelBead, ClaudeCodeRunner, createGoal, dbFile, decideApproval, FakeRunner, getIdentity,
   ghToken, loadIdentities, loadLimits, loadProjects, loadReview, OctetError, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
 } from '@octet/core';
+import { runToolCommand } from './tools.ts';
 
 const USAGE = `octet <command>
 
@@ -30,6 +31,9 @@ const USAGE = `octet <command>
   pr review <url> --identity <id>   read someone else's PR and give you a verdict (posts nothing)
   audit verify                      check the audit log's hash chain
   status                            goals, beads and recent events
+  doctor                            check node, git, gh, claude, identities, config, projects, database, audit chain
+  install                           create the ~/.local/bin/octet launcher and show the PATH line to add
+  completion zsh|bash               print a shell completion script (generated from this list)
 
 There is no default identity: every project must name one.`;
 
@@ -60,6 +64,7 @@ async function main(argv: string[]): Promise<void> {
   });
   const [group, cmd, ...rest] = positionals;
   if (values.help || !group) return void console.log(USAGE);
+  if (group === 'doctor' || group === 'install' || group === 'completion') return runToolCommand(group, cmd, USAGE);
 
   if (group === 'identity') {
     const ids = loadIdentities();
