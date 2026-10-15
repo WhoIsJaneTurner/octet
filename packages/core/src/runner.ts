@@ -7,6 +7,7 @@ import type { McpLaunch } from './mcp-policy.ts';
 import { notify, type RunObserver } from './observe.ts';
 import { prepareSandbox, watchMemory, type SandboxConfig, type SandboxRequest } from './sandbox.ts';
 import type { SeatId } from './seats.ts';
+import type { RunUsage } from './usage.ts';
 
 export interface RunRequest {
   seat: SeatId;
@@ -37,6 +38,8 @@ export interface RunResult {
   timedOut?: boolean;
   /** Stopped because the agent's processes passed the sandbox memory ceiling. */
   memoryExceeded?: boolean;
+  /** Tokens and estimated cost, when the agent reported them. Runners without this simply omit it. */
+  usage?: RunUsage;
 }
 
 export interface AgentRunner {
@@ -53,8 +56,6 @@ export interface ClaudeCodeOptions {
   command?: string;
   /** MCP servers for a run. Default: none, which is also what a missing option means. */
   mcp?: (req: RunRequest) => McpLaunch;
-  /** Read `--output-format stream-json` so tool calls reach `req.observer`. Off = plain text output, as before. */
-  observe?: (req: RunRequest) => boolean;
   /** Keep tool results in the events passed to the observer (content capture). */
   captureResults?: boolean;
   /** Sandbox settings for every run (tests that use a stand-in `claude` turn it off). Unset reads `[sandbox]` from config.toml. */
@@ -71,7 +72,6 @@ export class ClaudeCodeRunner implements AgentRunner {
 
   async run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
     const mcp = this.opts.mcp?.(req);
-    const stream = this.opts.observe?.(req) === true;
     const args = [
       '-p',
       '--append-system-prompt', req.systemPrompt,
@@ -82,7 +82,8 @@ export class ClaudeCodeRunner implements AgentRunner {
           '--disallowedTools', ['Edit', 'Write', 'NotebookEdit', 'Bash', ...DENIED_TOOLS].join(',')]
         : ['--permission-mode', 'acceptEdits', '--disallowedTools', DENIED_TOOLS.join(','),
           ...(mcp?.allowedTools.length ? ['--allowedTools', mcp.allowedTools.join(',')] : [])]),
-      ...(stream ? ['--output-format', 'stream-json', '--verbose'] : []),
+      // One JSON object per line: live text, tool calls for the audit, and a closing `result` with token counts and cost (claude-stream.ts).
+      '--output-format', 'stream-json', '--verbose',
     ];
     if (req.model) args.push('--model', req.model);
     // Throws in `required` mode when the sandbox cannot be applied: an agent never runs unprotected by accident.
@@ -119,38 +120,34 @@ export class ClaudeCodeRunner implements AgentRunner {
         clearTimeout(killTimer);
         req.signal?.removeEventListener('abort', onAbort);
       };
-      const take = (b: Buffer) => {
-        const s = b.toString();
-        output += s;
-        onChunk?.(s);
-      };
-      const parser = stream
-        ? new ClaudeStreamParser({
-          text: (s) => onChunk?.(s),
-          raw: (s) => { output += s; onChunk?.(s); },
-          // A server connected that the allow-list did not name: stop before the model can use it.
-          unlistedServer: (name) => {
-            violation = `MCP server "${name}" connected but is not on this seat's allow-list`;
-            notify(req.observer, 'decision', { request: 'mcp/connect', subject: name, allowed: false, reason: 'not on the allow-list' });
-            stop();
-          },
-        }, req.observer, new Set(mcp?.servers ?? []), this.opts.captureResults === true)
-        : undefined;
+      const parser = new ClaudeStreamParser({
+        text: (s) => onChunk?.(s),
+        raw: (s) => { output += s; onChunk?.(s); },
+        // A server connected that the allow-list did not name: stop before the model can use it.
+        unlistedServer: (name) => {
+          violation = `MCP server "${name}" connected but is not on this seat's allow-list`;
+          notify(req.observer, 'decision', { request: 'mcp/connect', subject: name, allowed: false, reason: 'not on the allow-list' });
+          stop();
+        },
+      }, req.observer, new Set(mcp?.servers ?? []), this.opts.captureResults === true);
       let stderr = '';
-      child.stdout.on('data', parser ? (b: Buffer) => parser.push(b.toString()) : take);
-      child.stderr.on('data', parser ? (b: Buffer) => { stderr += b.toString(); onChunk?.(b.toString()); } : take);
+      child.stdout.on('data', (b: Buffer) => parser.push(b.toString()));
+      child.stderr.on('data', (b: Buffer) => { stderr += b.toString(); onChunk?.(b.toString()); });
       child.on('error', (e) => { cleanup(); void sb?.dispose(); reject(e); });
       child.on('close', async (code) => {
         cleanup();
         // Anything left in the group after the leader exits is cleaned up too.
         killGroup('SIGKILL');
-        if (parser) {
-          parser.end();
-          output = parser.output + output + stderr + (violation ? `\n[octet] ${violation}\n` : '');
-        }
+        parser.end();
+        // The final answer (what the Reviewer's verdict is read from), then anything the CLI wrote to stderr.
+        output = parser.output + output + (stderr ? `${parser.output || output ? '\n' : ''}${stderr}` : '') + (violation ? `\n[octet] ${violation}\n` : '');
         const durationMs = Date.now() - started;
+        const usage = parser.usage;
         await sb?.finish().catch(() => {});
-        resolve({ exitCode: violation ? 1 : code ?? 1, output, durationMs, ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}), ...(memoryExceeded ? { memoryExceeded } : {}) });
+        resolve({
+          exitCode: violation ? 1 : code === 0 && parser.failed ? 1 : code ?? 1, output, durationMs,
+          ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}), ...(memoryExceeded ? { memoryExceeded } : {}), ...(usage ? { usage } : {}),
+        });
       });
       child.stdin.end(req.prompt);
     });
@@ -175,6 +172,8 @@ export class FakeRunner implements AgentRunner {
   afterEngineer?: (req: RunRequest) => void;
   /** Exit code to report per seat (default 0): lets a test make the engineer fail. */
   readonly exit = new Map<SeatId, number>();
+  /** Usage to report per seat, like Claude Code's closing `result` message. */
+  readonly usage = new Map<SeatId, RunUsage>();
   async run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
     this.calls.push(req);
     if (this.hang.has(req.seat)) {
@@ -196,6 +195,7 @@ export class FakeRunner implements AgentRunner {
     }
     const output = this.queues.get(req.seat)?.shift() ?? this.replies[req.seat] ?? 'fake run complete\n';
     onChunk?.(output);
-    return { exitCode: this.exit.get(req.seat) ?? 0, output, durationMs: 1 };
+    const usage = this.usage.get(req.seat);
+    return { exitCode: this.exit.get(req.seat) ?? 0, output, durationMs: 1, ...(usage ? { usage } : {}) };
   }
 }

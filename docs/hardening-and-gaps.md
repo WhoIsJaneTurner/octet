@@ -184,15 +184,15 @@ Done in session two: cancel, timeout, persisted output, heartbeat-based orphan d
 | Orphan recovery only at daemon start | `reconcileRunning` treats a `running` bead as live only with an open run whose heartbeat is under 30 s old and (on this host) whose pid exists. It runs at daemon start, every 15 s in the daemon, and before every `runBead` and `cancelBead`. It no longer fails runs that another live process owns |
 | Runner or git throws mid-run | `runBead` now marks the bead `failed`, closes the run and logs `bead.failed` with `reason: error` |
 
-**Still open in this section**
+**Closed in session three**
 
-| Gap | Fix |
+| Gap | Fix (done) |
 |---|---|
-| No goal-level failure state | `goals.status = 'failed'` exists but nothing sets it. Set it when the scheduler escalates a goal and you choose to abandon it; add an `abandon` action that cleans up worktrees |
-| No cleanup | Worktrees and branches remain after a goal is done or abandoned. On `done`/`abandoned`, remove bead and goal worktrees (keep branches until the PR merges), with an `octet gc` command for stragglers |
-| Temp directories leak | `reviewExternalPr` creates a temp directory per call and never removes it. Remove in a `finally` |
-| Reviews cannot be cancelled | Same mechanism (signal plus heartbeat) applies to Reviewer runs; not wired yet |
-| Output redaction | Run logs are written raw; see the security backlog |
+| No goal-level failure state | `abandonGoal` (core), `POST /api/goals/:id/abandon`, `octet goal abandon <goal>`, and an ABANDON GOAL button (with a confirm) on the board. It sets `goals.status = 'failed'` first, so the scheduler stops; cancels running engineers and reviews and waits for them to stop; denies any pending approval for the goal (a delivery can never be approved later) and marks awaiting plans rejected; removes the bead and goal worktrees; resolves the goal's escalations; logs `goal.abandoned`. Branches are kept. A `delivered` goal is refused: Octet never touches a PR, so close it on GitHub. A bead of an abandoned goal refuses to run. If an agent has not stopped within 15 s its worktree is kept and `octet gc` collects it later |
+| No cleanup | A merged PR (`refreshPr` sets the goal `done`) now removes the goal's worktrees too (`cleanupGoal`, event `goal.cleaned`). `octet gc` (`GET`/`POST /api/gc`) lists worktrees under `.octet/worktrees` that belong to a merged bead, a done or abandoned goal, or nothing in the database; it is a dry run unless you pass `--yes`. Branches are never deleted by Octet |
+| Temp directories leak | `reviewExternalPr` removes its temp directory in a `finally` |
+| Reviews cannot be cancelled | A review is now a run: it has a `bead_runs` row (`kind = 'review'`) with a heartbeat and a cancel flag, so `cancelBead` on an `in_review` bead (API, CLI, UI button and `x` key) stops it from any process. The bead stays `in_review`; the event is `review.cancelled`. The scheduler does not restart a review you cancelled: it raises a `review_cancelled` escalation instead, and clears it once there is a verdict. A second review of the same bead is refused while one is running |
+| Output redaction | Run logs go through `RunLogWriter` (`runlog.ts`): text is held until a complete line (and a complete private-key block), redacted with `redact`, and only then written, so a token split across two chunks is still caught. `Store.log` runs `redactDeep` on every event's data before hashing and inserting, so the audit chain covers what is stored; when something was hit the event gains a `redacted` count and a `run.redacted` event records the log's count. The drafted pre-review PR comment is redacted before it can be approved. **Not covered:** the live stream to the UI (`/output`, SSE) is raw text that is never persisted; `octet pr review` prints the Reviewer's text to your terminal unredacted; approvals other than the pre-review comment are not redacted |
 
 ## 4. Git correctness (M): done
 
@@ -207,24 +207,43 @@ Done in session two: cancel, timeout, persisted output, heartbeat-based orphan d
 
 ## 5. Cost and usage (S to M)
 
-- Capture token and cost data from the agent's structured output (check Claude Code's JSON output mode and flags; do not assume the field names) and store per run.
-- Show totals per bead, per goal and per day in the UI.
-- Enforce the per-goal run ceiling from the planning doc, and an optional daily ceiling that pauses the scheduler.
-- Effort scaling (planning doc §5) is the main lever on cost.
+**Done in session three**
+
+- **Capture.** `ClaudeCodeRunner` now runs `claude -p --output-format stream-json --verbose` (prompt still on stdin). `ClaudeStream` (`claude-stream.ts`) turns the lines into the same plain text as before (assistant text as it arrives, one `> Tool detail` line per tool call, nothing for init or tool results), so live output keeps working and now shows progress during a run, not only the final answer. The closing `result` message supplies the final answer (`RunResult.output`, which the Reviewer's verdict is parsed from) and `RunResult.usage` (a new optional field). A result with `is_error: true` makes a zero exit code a failure. A line that is not JSON is passed through untouched. `--output-format json` was not used: it prints once at the end, so nothing would stream.
+- **Store.** Migration 4 adds `kind` (`engineer` or `review`), `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, `cost_usd`, `num_turns` and `model` to `bead_runs`. `Store.usageSummary()` totals per bead, goal and local day; review runs count too. Parsing is defensive: any missing or malformed field is skipped, and a run with no usage still counts as a run.
+- **UI and CLI.** Tab `5 usage` (today, by day, by goal and bead), a cost line on each bead, `$x.xx today` in the header, and `octet usage`. The figures are Claude Code's own estimate at list prices; on a subscription plan they are not what you are charged.
+- **Ceiling.** `[usage] daily_cost_usd` and `daily_runs` in `config.toml`, both optional. When today's total reaches either, the scheduler (`tick`, via `usageHold`) starts no new engineer or reviewer runs; merges and deliveries still happen, a `usage.ceiling_reached` event is logged once a day, and the UI shows the hold. A run you start with the button is not blocked. The per-goal run ceiling from the planning doc was already built into the scheduler (`run_ceiling`).
+
+**Claude Code 2.1.296: observed output shape** (`claude -p "reply ok" --output-format stream-json --verbose --include-partial-messages`, one live run). One JSON object per line: `system/init`, `system/status`, `stream_event` records (only with `--include-partial-messages`), one `assistant` message per content block (`message.content[]` holds `text` or `tool_use` blocks, with its own `message.usage`), a `rate_limit_event`, and a final `result`. `--output-format json` prints just that final `result` object. Its fields, as observed:
+
+```
+type "result", subtype "success", is_error false, result "ok", stop_reason "end_turn", terminal_reason "completed"
+total_cost_usd 0.0403806, num_turns 1, duration_ms 1681, duration_api_ms 1632, session_id, uuid
+usage { input_tokens 2, output_tokens 4, cache_read_input_tokens 22366, cache_creation_input_tokens 9525,
+        cache_creation { ephemeral_5m_input_tokens, ephemeral_1h_input_tokens }, server_tool_use { web_search_requests, web_fetch_requests },
+        service_tier, inference_geo, iterations [...], output_tokens_details { thinking_tokens }, speed }
+modelUsage { "<model>": { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUSD, contextWindow,
+                          maxOutputTokens, canonicalModel, provider, costBasis "list" } }
+permission_denials [], plus timing and subagent bookkeeping
+```
+
+A trimmed copy is the test fixture `packages/core/test/fixtures/claude-stream-ok.jsonl`. Only `usage.*`, `total_cost_usd`, `num_turns`, `modelUsage` (for the model name), `result` and `is_error` are read. `modelUsage[].costBasis: "list"` is why the cost is an estimate. Not verified live: a full engineer run through the daemon with stream-json (the prompt-on-stdin plus stream-json combination is exercised only against a stand-in `claude` script in the tests).
+
+**Still open:** usage for the goal-level pre-review and `octet pr review` (they have no bead, so no run row); effort scaling (planning doc §5), the main lever on cost.
 
 ## 6. Product and packaging
 
 ### 6.1 UI
 
-- **No project management in the UI.** Adding a project needs the CLI, and the daemon loads projects at startup, so a CLI-added project does not appear until restart. The API route `POST /api/projects` exists; add the form, and make the daemon re-read `projects.toml` when it changes.
-- **Identity doctor in the UI** (currently CLI only).
-- **Goal and bead management:** edit a bead's brief before it runs, delete a bead that has not started, reorder, abandon a goal.
-- **Sidebar selection** defaults to the first goal even when you opened the inbox for another; select the goal that owns the item you open.
-- **Notifications:** a macOS notification when an approval arrives or a goal needs you (`osascript` is enough). Slack later.
-- **Keyboard help overlay** (`?`).
+- ~~**Project management in the UI.**~~ **Done.** `6 setup` has an add-project form (name, path, identity, vault, vault options, autonomy; `POST /api/projects`), and each project's autonomy can be changed in place (`POST /api/projects/:name`). The daemon notices changes to `projects.toml` (checked on every request and every 2 s, with the last good list kept and the error shown if the file breaks), so a CLI-added project appears without a restart.
+- ~~**Identity doctor in the UI.**~~ **Done.** `POST /api/identities/doctor` (on demand only, one at a time, async so it does not block the daemon); the same checks as `octet identity doctor`, which now shares the code (`doctorIdentities`). The ssh probe gained a 10 s connect timeout.
+- **Goal and bead management:** ~~edit a bead's brief before it runs, delete a bead that has not started, abandon a goal~~ **Done** (`editBead`, `deleteBead`, `abandonGoal`; edit is allowed for `todo` and `failed` beads, delete only for a bead that has never run and that nothing waits on). **Reordering is not built.**
+- ~~**Sidebar selection**~~ **Done.** OPEN buttons on escalations and approvals select the owning goal (and bead); delivered and done goals show their PR link under the goal in the sidebar; abandoned goals show a mark and "(abandoned)" for screen readers.
+- ~~**Notifications:**~~ **macOS done.** `[notify] macos = true` in `config.toml`: the daemon calls `osascript` (text passed as arguments, never spliced into the script) when a new approval or escalation appears; what is already waiting at startup is not announced; a missing `osascript` or a throwing notifier never affects a run. Slack later.
+- ~~**Keyboard help overlay** (`?`).~~ **Done.** A modal dialog (focus moves in, Esc or `?` closes it, focus returns). Keys `5` and `6` open the usage and setup tabs.
 - **Accessibility pass:** focus order, contrast of the dim green on black at small sizes, screen-reader labels for status glyphs (several are set; audit all), and a high-contrast option. The CRT effect already has an off switch; keep respecting `prefers-reduced-motion`.
 - **Mobile layout** works down to narrow widths but has not been tuned.
-- **Cross-browser:** only Chrome was exercised.
+- **Cross-browser:** only Chrome was exercised (session three drove the new UI in headless Chrome over the DevTools protocol: help overlay, bead edit, setup form, identity check, usage tab, OPEN selection, PR link, abandon with confirm; no console errors). That script is not in the repo.
 
 ### 6.2 Desktop shell
 
@@ -260,7 +279,7 @@ The original plan was an Electron wrapper. Today the UI runs in a browser tab se
 |---|---|
 | Audit head anchoring | See plan-vault §5. Until done, tail truncation of the event log is undetectable |
 | Token handling | The per-session API token is injected into the HTML. Fine on loopback with the Host check; if the daemon ever binds beyond loopback, replace with real auth |
-| Secrets in logs | Engineer output and event data can include secrets the agent saw. Add a redaction pass before persisting output and events |
+| Secrets in logs | **Mostly done** (see §3): run logs and event data are redacted before they are stored or hashed. Gaps: the live UI stream, terminal output of `octet pr review`, and approval summaries other than the pre-review comment |
 | Prompt-injection evals | See planning doc §8; add cases for each intake source |
 | Dependency hygiene | `pnpm audit` now runs in CI (non-blocking job) and installs use a frozen lockfile. Still open: pin ranges in the `package.json` files, and review the one install-script exception (`esbuild`, disabled in `pnpm-workspace.yaml` because its binary ships separately) |
 | Signing | **Done.** An identity with `signing_key = "~/.ssh/id_signing"` signs every commit made under it with SSH signing. `gitEnv` (`identity.ts`) adds `gpg.format=ssh`, `user.signingkey=<key>` and `commit.gpgsign=true` as `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` environment entries, appended after any already present, and only when the identity sets the key. Nothing is written to a repo or `~/.gitconfig`. A test makes a real signed commit. Not covered: the key must have no passphrase (or be in a running agent), and GitHub shows "Verified" only after the public key is added as a *signing* key on the account |
@@ -290,8 +309,8 @@ Octet itself never changes these logins; `octet doctor` only checks that a token
 
 1. Demo PR #1 on `octet-throwaway` contains output from the fake engineer (a file holding the prompt), not real work. It exists only to prove delivery; the Reviewer correctly rejected it. Delete it.
 2. The first run showed Claude's reply mentioning unauthorized connectors; fixed by launching builders with MCP disabled, but it could not be reproduced on demand, so treat the cause as unproven and watch for it.
-3. `pr review` and `pr prereview` rely on the PR being reachable with the named identity; a 404 surfaces as a `gh` error, not a friendly message.
-4. The UI does not show `delivered` goals' PR link in the sidebar, only on the board.
+3. ~~`pr review` and `pr prereview` rely on the PR being reachable with the named identity; a 404 surfaces as a `gh` error, not a friendly message.~~ **Fixed.** `friendlyGhError` (`forge.ts`) turns a missing PR, a login failure and a network failure into plain messages that name the identity; anything else keeps the raw `gh` text.
+4. ~~The UI does not show `delivered` goals' PR link in the sidebar, only on the board.~~ **Fixed.**
 5. ~~Nothing prevents two daemon processes on the same database.~~ **Fixed.** The daemon takes `<data>/daemon.lock` (pid, port, start time) before it opens the database. A second daemon exits with a message naming the first one's pid and port; a lock whose pid is dead is taken over; the lock is removed on SIGINT, SIGTERM and exit. `octet doctor` reports a live or stale lock. Limit: it guards one data directory on one machine; a database on a network share is not protected.
 6. `FakeRunner` writes `engineer-output.txt` into worktrees. Fine for tests; make sure no real flow can ever use it (the `--fake` flag on the daemon and CLI is the only route).
 

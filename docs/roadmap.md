@@ -28,13 +28,13 @@ Everything below is implemented, tested (125 unit and integration tests) and pus
 | Courier | Delivery request, approval, push, PR, all write-ahead logged; PR state tracking; optional labelled pre-review comment (real run against GitHub) |
 | Audit | SHA-256 hash chain, verify via CLI, API and UI |
 | Caps | Concurrent engineers (3) and active goals (3), set in `config.toml` |
-| Recovery | Heartbeat table; orphaned `running` beads are failed by a periodic sweep, not only at start. Cancel (UI, API, CLI, Ctrl-C), run timeout, per-run log files |
+| Recovery | Heartbeat table; orphaned `running` beads are failed by a periodic sweep, not only at start. Cancel (UI, API, CLI, Ctrl-C; engineers and reviewers), run timeout, per-run log files (redacted), goal abandon and `octet gc`, token and cost per run with an optional daily ceiling |
 | Daemon | Loopback HTTP and SSE, per-session token, Host-header check, PR polling every 90 s |
 | Intake | `requests` table (dedup on source + external ref, 20,000-char body cap), UI form, `octet ask`, route and decline from the inbox, all audited. Planning does not read them yet |
 | Planning | Vault per project (plain files, atomic, locked, redacted, optional git with audit-head anchoring). Architect writes a validated JSON plan; plan gate in the inbox (approve, reject with feedback, edit); hash recorded in the audit chain and re-checked before beads are made; Marshal decomposition |
 | Scheduler | Durable-state loop in the daemon: runs, reviews, retries, escalations, run ceiling, pause, autonomy per project (`manual`, `plan-gated`, `auto-to-pr`). Only touches goals made from an approved plan |
 | UI | Green-screen React app: council, board, inbox, log, diff viewer, approvals |
-| CLI | `identity`, `project`, `goal`, `bead`, `approval`, `pr`, `audit`, `status` |
+| CLI | `identity`, `project`, `goal` (incl. `abandon`), `bead` (incl. `edit`, `delete`), `approval`, `pr`, `audit`, `gc`, `usage`, `status` |
 
 ### Seats
 

@@ -89,3 +89,33 @@ export function loadGithubHosts(file: string = join(octetHome(), 'config.toml'))
   const g = (readConfigFile('config', file) as { github?: { hosts?: unknown } }).github;
   return Array.isArray(g?.hosts) ? g.hosts.filter((h): h is string => typeof h === 'string') : [];
 }
+
+export interface UsageConfig {
+  /** The scheduler stops starting new work once today's estimated cost reaches this (USD). Unset = no ceiling. */
+  dailyCostUsd?: number;
+  /** Same, for the number of agent runs started today. */
+  dailyRuns?: number;
+}
+
+const ceiling = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+
+/** Reads `[usage]` (`daily_cost_usd`, `daily_runs`) from config.toml. Missing file or keys mean no ceiling. */
+export function loadUsage(file: string = join(octetHome(), 'config.toml')): UsageConfig {
+  if (!existsSync(file)) return {};
+  const t = (readConfigFile('config', file) as { usage?: Record<string, unknown> }).usage ?? {};
+  const cost = ceiling(t.daily_cost_usd);
+  const runs = ceiling(t.daily_runs);
+  return { ...(cost !== undefined ? { dailyCostUsd: cost } : {}), ...(runs !== undefined ? { dailyRuns: Math.floor(runs) } : {}) };
+}
+
+export interface NotifyConfig {
+  /** Show a macOS notification when an approval arrives or a goal needs you. Off by default. */
+  macos: boolean;
+}
+
+/** Reads `[notify]` (`macos = true`) from config.toml. */
+export function loadNotify(file: string = join(octetHome(), 'config.toml')): NotifyConfig {
+  if (!existsSync(file)) return { macos: false };
+  const t = (readConfigFile('config', file) as { notify?: Record<string, unknown> }).notify ?? {};
+  return { macos: t.macos === true };
+}

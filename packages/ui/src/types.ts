@@ -2,7 +2,7 @@ export type BeadStatus = 'todo' | 'running' | 'in_review' | 'changes_requested' 
 
 export interface Seat { id: string; title: string; job: string; kind: 'llm' | 'deterministic'; writesCode: boolean }
 export interface Identity { id: string; ghUser: string; email: string }
-export interface Project { name: string; path: string; identity: string; vault?: string; autonomy?: 'manual' | 'plan-gated' | 'auto-to-pr' }
+export interface Project { name: string; path: string; identity: string; vault?: string; vaultGit?: boolean; vaultInRepo?: boolean; autonomy?: 'manual' | 'plan-gated' | 'auto-to-pr' }
 export interface Goal { id: string; project: string; title: string; branch: string; worktree: string; status: string; paused: boolean; createdAt: string }
 export interface Bead {
   id: string; goalId: string; title: string; brief: string; dependsOn: string[];
@@ -16,12 +16,20 @@ export interface State {
   events: OctetEvent[]; running: string[];
   reviewing: string[]; review: { auto: boolean; autoMerge: boolean; maxRounds: number }; approvals: Approval[]; prs: PullRequest[]; limits: { maxEngineers: number; maxActiveGoals: number }; audit: ChainCheck;
   intake?: IntakeStatus;
+  usage: UsageSummary; projectsError?: string;
 }
 
 export interface IntakeStatus {
   sources: { kind: string; enabled: boolean; detail: string; lastPollAt: string | null; lastError: string | null }[];
   held: string[];
 }
+
+export interface UsageTotals { runs: number; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number; costUsd: number }
+export interface UsageSummary {
+  today: UsageTotals; byDay: (UsageTotals & { day: string })[]; byBead: Record<string, UsageTotals>; byGoal: Record<string, UsageTotals>; total: UsageTotals;
+  ceiling: { dailyCostUsd?: number; dailyRuns?: number }; hold?: string;
+}
+export interface IdentityHealth { id: string; ghUser: string; sshUser: string | null; sshOk: boolean; tokenOk: boolean; ok: boolean }
 
 export interface Request {
   id: string; source: string; externalRef: string | null; project: string | null; title: string; body: string;

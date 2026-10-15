@@ -98,17 +98,20 @@ const LANES: { key: Bead['status'][]; title: string }[] = [
   { key: ['merged'], title: 'merged' },
 ];
 
-export function Board({ goal, beads, selected, onSelect, tag, onTogglePause }: {
+export function Board({ goal, beads, selected, onSelect, tag, onTogglePause, onAbandon }: {
   goal: Goal | undefined; beads: Bead[]; selected: string | undefined;
-  onSelect: (id: string) => void; tag: React.ReactNode; onTogglePause?: () => void;
+  onSelect: (id: string) => void; tag: React.ReactNode; onTogglePause?: () => void; onAbandon?: () => void;
 }) {
   if (!goal) return <span className="faint">No goal selected. Create one from the left panel.</span>;
   return (
     <>
       <div className="row">
         <b>{goal.title}</b> {tag} <span className="faint">{goal.branch}</span>
-        <span className={goal.status === 'active' ? 'dim' : 'cyan'}>[{goal.status.replace('_', ' ')}{goal.paused ? ', paused' : ''}]</span>
+        <span className={goal.status === 'active' ? 'dim' : goal.status === 'failed' ? 'red' : 'cyan'}>[{goal.status === 'failed' ? 'abandoned' : goal.status.replace('_', ' ')}{goal.paused ? ', paused' : ''}]</span>
         {onTogglePause && goal.status === 'active' && beads.some((b) => b.planId) && <button onClick={onTogglePause}>{goal.paused ? 'RESUME SCHEDULER' : 'PAUSE SCHEDULER'}</button>}
+        {onAbandon && ['active', 'planning', 'plan_ready'].includes(goal.status) && (
+          <button onClick={onAbandon} title="Stop its agents and delete its worktrees. Branches are kept.">ABANDON GOAL</button>
+        )}
       </div>
       <div className="cols">
         {LANES.map((lane) => {

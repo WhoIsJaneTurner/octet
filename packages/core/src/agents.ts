@@ -66,8 +66,6 @@ export function buildRunner(opts: BuildRunnerOptions): RunnerBundle {
     ...(opts.claudeCommand ? { command: opts.claudeCommand } : {}),
     ...(opts.sandbox ? { sandbox: opts.sandbox } : {}),
     mcp: (req) => mcpFor(config.mcp, req.seat, req.readOnly === true),
-    // Tool calls are only visible in stream-json, so it is read when something consumes them.
-    observe: (req) => !!exporter || mcpFor(config.mcp, req.seat, req.readOnly === true).servers.length > 0,
     captureResults: telemetry.captureContent,
   });
   const bySeat: Partial<Record<SeatId, AgentRunner>> = {};

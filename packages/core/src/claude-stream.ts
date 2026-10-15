@@ -1,4 +1,16 @@
 import { notify, untrusted, type RunObserver } from './observe.ts';
+import { parseUsage, type RunUsage } from './usage.ts';
+
+const MAX_DETAIL = 120;
+
+/** One short line saying what a tool call is about, e.g. the file an Edit touches. */
+function toolDetail(input: unknown): string {
+  if (!input || typeof input !== 'object') return '';
+  const i = input as Record<string, unknown>;
+  const v = [i.file_path, i.path, i.command, i.pattern, i.url, i.description].find((x) => typeof x === 'string') as string | undefined;
+  const flat = (v ?? '').replace(/\s+/g, ' ').trim();
+  return flat.length > MAX_DETAIL ? `${flat.slice(0, MAX_DETAIL)}...` : flat;
+}
 
 /**
  * Reads `claude -p --output-format stream-json --verbose`. Field names below were checked against a real run
@@ -12,7 +24,7 @@ import { notify, untrusted, type RunObserver } from './observe.ts';
  */
 
 export interface StreamSink {
-  /** Assistant text, for live display. */
+  /** Assistant text and one `> Tool detail` line per tool call, for live display. */
   text(s: string): void;
   /** A line that was not JSON (an error banner, say). */
   raw(s: string): void;
@@ -31,6 +43,8 @@ export class ClaudeStreamParser {
   private buf = '';
   /** The final `result` text, if the run got that far. */
   result: string | undefined;
+  /** The closing `result` message as received (usage, cost, is_error). */
+  private resultMessage: Record<string, unknown> | undefined;
   private assistantText = '';
 
   private readonly sink: StreamSink;
@@ -43,6 +57,16 @@ export class ClaudeStreamParser {
     this.obs = obs;
     this.allowedServers = allowedServers;
     this.captureResults = captureResults;
+  }
+
+  /** Tokens and estimated cost from the closing `result`, when it carried them. */
+  get usage(): RunUsage | undefined {
+    return parseUsage(this.resultMessage);
+  }
+
+  /** The agent itself reported an error result, whatever the exit code says. */
+  get failed(): boolean {
+    return this.resultMessage?.is_error === true;
   }
 
   /** What to report as the run's output: the final result, else whatever the assistant said. */
@@ -80,6 +104,7 @@ export class ClaudeStreamParser {
             this.sink.text(`${b.text}\n`);
           } else if (b.type === 'tool_use' && typeof b.name === 'string') {
             const name = untrusted(b.name, 200);
+            this.sink.text(`> ${name} ${toolDetail(b.input)}`.trimEnd() + '\n');
             const mcp = mcpName(name);
             notify(this.obs, 'toolCall', { id: String(b.id ?? ''), name, input: b.input, ...(mcp ? { mcp: { server: untrusted(mcp.server, 100), tool: untrusted(mcp.tool, 100) } } : {}) });
           }
@@ -96,6 +121,7 @@ export class ClaudeStreamParser {
         }
         break;
       case 'result': {
+        this.resultMessage = m;
         if (typeof m.result === 'string') this.result = m.result;
         const u = asObj(m.usage);
         const num = (v: unknown) => (typeof v === 'number' ? v : 0);

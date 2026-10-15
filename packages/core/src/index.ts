@@ -40,3 +40,7 @@ export * from './observed-runner.ts';
 export * from './agents.ts';
 export * from './sandbox.ts';
 export * from './netproxy.ts';
+export * from './usage.ts';
+export * from './runlog.ts';
+export * from './cleanup.ts';
+export * from './identity-doctor.ts';

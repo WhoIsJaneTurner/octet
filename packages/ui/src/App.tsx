@@ -2,17 +2,20 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { api, useOctet } from './api';
 import { Detail } from './Detail';
 import { Clarifications, Escalations, Inbox } from './Approvals';
+import { DoctorPanel, HelpOverlay, ProjectsPanel, UsagePanel, usageLine } from './Manage';
 import { NewRequest, RequestList } from './Requests';
 import { IntakeLine } from './IntakeLine';
 import { Board, Council, Log, PrCard } from './views';
 import { IdentityTag } from './ui';
 
-type Tab = 'council' | 'board' | 'inbox' | 'log';
+type Tab = 'council' | 'board' | 'inbox' | 'log' | 'usage' | 'setup';
 const TABS: { id: Tab; label: string }[] = [
   { id: 'council', label: '1 council' },
   { id: 'board', label: '2 board' },
   { id: 'inbox', label: '3 inbox' },
   { id: 'log', label: '4 log' },
+  { id: 'usage', label: '5 usage' },
+  { id: 'setup', label: '6 setup' },
 ];
 
 function load(key: string, fallback: string): string {
@@ -35,6 +38,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [crt, setCrt] = useState(load('octet.crt', '1') === '1');
   const [form, setForm] = useState<'goal' | 'bead' | null>(null);
+  const [help, setHelp] = useState(false);
 
   useEffect(() => { document.body.classList.toggle('crt', crt); save('octet.crt', crt ? '1' : '0'); }, [crt]);
 
@@ -50,6 +54,15 @@ export function App() {
   useEffect(() => { if (activeBeadId) void loadOutput(activeBeadId); }, [activeBeadId, loadOutput]);
 
   const select = (id: string) => { setBeadId(id); setTab('board'); };
+  /** Opening an inbox item shows the goal (and bead) that owns it. */
+  const openGoal = (gid: string, bid?: string) => { setGoalId(gid); setBeadId(bid); setTab('board'); };
+  const abandon = async () => {
+    if (!goal) return;
+    if (!window.confirm(`Abandon the goal "${goal.title}"?\n\nAny running agent is stopped and its worktrees are deleted. Branches are kept. This cannot be undone.`)) return;
+    setError(null);
+    try { await api(`/api/goals/${goal.id}/abandon`, {}); await refresh(); }
+    catch (e) { setError((e as Error).message); }
+  };
   const deliver = async () => {
     if (!goal) return;
     setError(null);
@@ -66,8 +79,12 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement;
+      if (help) { if (e.key === 'Escape' || e.key === '?') { e.preventDefault(); setHelp(false); } return; }
       if (['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === '1') setTab('council');
+      if (e.key === '?') setHelp(true);
+      else if (e.key === '5') setTab('usage');
+      else if (e.key === '6') setTab('setup');
+      else if (e.key === '1') setTab('council');
       else if (e.key === '2') setTab('board');
       else if (e.key === '3') setTab('inbox');
       else if (e.key === '4') setTab('log');
@@ -102,6 +119,7 @@ export function App() {
         <span className={online ? 'on' : 'off'}>{online ? '● daemon online' : '○ daemon offline'}</span>
         <span className="dim">{state.identities.length} identities</span>
         <span className={state.running.length ? 'amber' : 'dim'}>{state.running.length}/{state.limits.maxEngineers} running</span>
+        <span className={state.usage.hold ? 'amber' : 'dim'} title={state.usage.hold ?? usageLine(state.usage.today)}>{state.usage.hold ? '! ' : ''}${state.usage.today.costUsd.toFixed(2)} today</span>
         <span className={state.audit.ok ? 'dim' : 'red'} title={state.audit.ok ? `head ${state.audit.head.slice(0, 12)}` : state.audit.reason}>{state.audit.ok ? `audit ✔ ${state.audit.checked}` : '✖ AUDIT CHAIN BROKEN'}</span>
         {state.requests.some((r) => r.status === 'new') && <span className="cyan">? {state.requests.filter((r) => r.status === 'new').length} to route</span>}
         {state.clarifications.length > 0 && <span className="cyan">? {state.clarifications.length} question{state.clarifications.length > 1 ? 's' : ''} for you</span>}
@@ -113,16 +131,25 @@ export function App() {
 
       <div className="main">
         <nav className="col" aria-label="Projects and goals">
-          {state.projects.length === 0 && <div className="amber">No projects. Add one with:<pre className="dim">octet project add &lt;name&gt; &lt;path&gt; --identity &lt;id&gt;</pre></div>}
+          {state.projects.length === 0 && <div className="amber">No projects. Add one in <button onClick={() => setTab('setup')}>6 setup</button></div>}
           {state.projects.map((p) => (
             <div key={p.name}>
               <div className="proj">{p.name} <IdentityTag id={p.identity} order={idOrder} /></div>
-              {state.goals.filter((g) => g.project === p.name).map((g) => (
-                <button key={g.id} className="nav-item" aria-current={goal?.id === g.id}
-                  onClick={() => { setGoalId(g.id); setBeadId(undefined); setTab('board'); }}>
-                  {g.title}{g.status === 'delivered' ? ' ⇡' : g.status === 'done' ? ' ✔' : g.status === 'planning' ? ' …' : g.status === 'plan_ready' ? ' ?' : g.paused ? ' ‖' : ''}
-                </button>
-              ))}
+              {state.goals.filter((g) => g.project === p.name).map((g) => {
+                const pr = state.prs.find((x) => x.goalId === g.id);
+                return (
+                  <div key={g.id}>
+                    <button className="nav-item" aria-current={goal?.id === g.id}
+                      onClick={() => { setGoalId(g.id); setBeadId(undefined); setTab('board'); }}>
+                      {g.title}{g.status === 'delivered' ? ' ⇡' : g.status === 'done' ? ' ✔' : g.status === 'failed' ? ' ✖' : g.status === 'planning' ? ' …' : g.status === 'plan_ready' ? ' ?' : g.paused ? ' ‖' : ''}
+                      {g.status === 'failed' && <span className="sr-only"> (abandoned)</span>}
+                    </button>
+                    {pr && (g.status === 'delivered' || g.status === 'done') && (
+                      <a className="pr-link" href={pr.url} target="_blank" rel="noopener noreferrer">PR #{pr.number} {pr.state.toLowerCase()}<span className="sr-only"> for {g.title}</span></a>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ))}
           <div className="row">
@@ -149,25 +176,28 @@ export function App() {
             <PrCard pr={state.prs.find((p) => p.goalId === goal.id)!} reviewing={state.reviewing.includes(goal.id)}
               onDone={() => void refresh()} setError={setError} />
           )}
-          {tab === 'board' && <Board goal={goal} beads={goalBeads} selected={bead?.id} onSelect={select} tag={identityTag}
+          {tab === 'board' && <Board goal={goal} beads={goalBeads} selected={bead?.id} onSelect={select} tag={identityTag} onAbandon={() => void abandon()}
             onTogglePause={goal ? () => { void api(`/api/goals/${goal.id}/${goal.paused ? 'resume' : 'pause'}`, {}).then(() => refresh()).catch((e: Error) => setError(e.message)); } : undefined} />}
           {tab === 'inbox' && <IntakeLine intake={state.intake} requests={state.requests} />}
           {tab === 'inbox' && <Clarifications items={state.clarifications} goals={state.goals} onDone={() => void refresh()} setError={setError} />}
-          {tab === 'inbox' && <Escalations escalations={state.escalations} goals={state.goals} onDone={() => void refresh()} setError={setError} />}
+          {tab === 'inbox' && <Escalations escalations={state.escalations} goals={state.goals} onOpen={openGoal} onDone={() => void refresh()} setError={setError} />}
           {tab === 'inbox' && <RequestList requests={state.requests} projects={state.projects} planning={state.planning} onDone={() => void refresh()} setError={setError} />}
-          {tab === 'inbox' && <Inbox approvals={state.approvals} goals={state.goals} order={idOrder} onDone={() => void refresh()} setError={setError} />}
+          {tab === 'inbox' && <Inbox approvals={state.approvals} goals={state.goals} order={idOrder} onOpen={openGoal} onDone={() => void refresh()} setError={setError} />}
           {tab === 'log' && <Log events={state.events} />}
+          {tab === 'usage' && <UsagePanel s={state} />}
+          {tab === 'setup' && <><ProjectsPanel s={state} order={idOrder} onDone={() => void refresh()} setError={setError} /><DoctorPanel order={idOrder} setError={setError} /></>}
         </main>
 
         <aside className="col detail" aria-label="Bead detail">
-          <Detail bead={bead} goal={goal} beads={goalBeads} output={bead ? outputs[bead.id] ?? '' : ''} running={isRunning} reviewing={!!bead && state.reviewing.includes(bead.id)} events={state.events}
+          <Detail bead={bead} goal={goal} beads={goalBeads} output={bead ? outputs[bead.id] ?? '' : ''} running={isRunning} reviewing={!!bead && state.reviewing.includes(bead.id)} events={state.events} usage={bead ? state.usage.byBead[bead.id] : undefined}
             view={view} setView={setView} setError={setError} onDone={() => void refresh()} />
         </aside>
       </div>
 
       <footer className="foot">
-        <kbd>1</kbd>council<kbd>2</kbd>board<kbd>3</kbd>inbox<kbd>4</kbd>log<kbd>j</kbd><kbd>k</kbd>bead<kbd>r</kbd>run<kbd>x</kbd>cancel<kbd>v</kbd>review<kbd>a</kbd>approve<kbd>c</kbd>changes<kbd>d</kbd>diff
+        <kbd>1</kbd>council<kbd>2</kbd>board<kbd>3</kbd>inbox<kbd>4</kbd>log<kbd>j</kbd><kbd>k</kbd>bead<kbd>r</kbd>run<kbd>x</kbd>cancel<kbd>v</kbd>review<kbd>a</kbd>approve<kbd>c</kbd>changes<kbd>d</kbd>diff<kbd>?</kbd>help
       </footer>
+      {help && <HelpOverlay onClose={() => setHelp(false)} />}
     </div>
   );
 }

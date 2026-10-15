@@ -24,6 +24,11 @@ max_runs_factor = 4
 max_retries = 0
 cap_wait_minutes = 15
 bump_files = 5
+[usage]
+daily_cost_usd = 5.5
+daily_runs = 50
+[notify]
+macos = true
 [github]
 hosts = ["ghe.example.com"]
 [intake.github]

@@ -10,7 +10,7 @@ if (process.env.FAKE_CLAUDE_ARGS) writeFileSync(process.env.FAKE_CLAUDE_ARGS, JS
 process.stdin.resume();
 process.stdin.on('end', () => {
   if (!args.includes('stream-json')) { console.log('plain output'); return; }
-  const lines = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'claude-mcp-stream.jsonl'), 'utf8').trim().split('\n');
+  const lines = readFileSync(join(dirname(fileURLToPath(import.meta.url)), process.env.FAKE_CLAUDE_TRANSCRIPT ?? 'claude-mcp-stream.jsonl'), 'utf8').trim().split('\n');
   if (process.env.FAKE_CLAUDE_ROGUE) {
     const init = JSON.parse(lines[0]);
     init.mcp_servers = [{ name: 'rogue', status: 'connected' }];

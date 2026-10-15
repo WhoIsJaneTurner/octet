@@ -17,7 +17,7 @@ export interface Issue {
   message: string;
 }
 
-type Kind = 'bool' | 'posint' | 'nonneg' | 'table' | 'string' | 'strings' | { oneOf: readonly string[] };
+type Kind = 'bool' | 'posint' | 'posnum' | 'nonneg' | 'table' | 'string' | 'strings' | { oneOf: readonly string[] };
 type Schema = Record<string, Kind>;
 type Table = Record<string, unknown>;
 
@@ -30,6 +30,8 @@ export const CONFIG_SCHEMA: Record<string, Schema> = {
   review: { auto: 'bool', auto_merge: 'bool', max_rounds: 'posint', goal_review: 'bool' },
   planning: { max_beads: 'posint', max_points: 'posint', max_runs_factor: 'posint', max_retries: 'nonneg', cap_wait_minutes: 'posint', bump_files: 'posint' },
   github: { hosts: 'strings' },
+  usage: { daily_cost_usd: 'posnum', daily_runs: 'posint' },
+  notify: { macos: 'bool' },
   'intake.github': { enabled: 'bool', label: 'string', poll_seconds: 'posint', allowed_authors: 'strings', projects: 'strings' },
   'intake.jira': { enabled: 'bool', site: 'string', jql: 'string', project: 'string', poll_seconds: 'posint', allowed_transitions: 'strings', projects: 'table' },
   'intake.chat': { enabled: 'bool', allowed_users: 'strings', command: 'string', project: 'string', inbox_url: 'string' },
@@ -55,6 +57,7 @@ function typeProblem(v: unknown, kind: Kind): string | null {
   }
   switch (kind) {
     case 'bool': return typeof v === 'boolean' ? null : `expected true or false, got ${describe(v)}`;
+    case 'posnum': return typeof v === 'number' && Number.isFinite(v) && v > 0 ? null : `expected a positive number, got ${describe(v)}`;
     case 'table': return isTable(v) ? null : `expected a table, got ${describe(v)}`;
     case 'nonneg': return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? null : `expected a whole number of 0 or more, got ${describe(v)}`;
     case 'posint': return typeof v === 'number' && Number.isInteger(v) && v > 0 ? null : `expected a positive whole number, got ${describe(v)}`;

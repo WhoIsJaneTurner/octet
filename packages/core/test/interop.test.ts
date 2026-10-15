@@ -119,14 +119,15 @@ test('MCP: server-supplied text is stripped and capped before it is stored', () 
 
 // ---- Claude Code runner ---------------------------------------------------------------------------------------
 
-test('Claude runner: without options the command line is exactly the old one (MCP off, plain output)', async () => {
+test('Claude runner: without options MCP is off, nothing extra is allowed, and output is read as stream-json', async () => {
   const { cwd, argsFile } = work();
-  const r = await new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE }).run(req(cwd, { env: { PATH: process.env.PATH!, FAKE_CLAUDE_ARGS: argsFile } }));
-  assert.equal(r.output.trim(), 'plain output');
+  const r = await new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE }).run(req(cwd, { env: { PATH: process.env.PATH!, FAKE_CLAUDE_ARGS: argsFile, FAKE_CLAUDE_TRANSCRIPT: 'claude-stream-ok.jsonl' } }));
+  assert.equal(r.output.trim(), 'ok'); // the transcript's final result
   const a = argsOf(argsFile);
   assert.deepEqual(a.slice(0, 5), ['-p', '--append-system-prompt', 'SECRET-SYSTEM persona', '--strict-mcp-config', '--mcp-config']);
   assert.equal(flag(a, '--mcp-config'), '{"mcpServers":{}}');
-  assert.ok(!a.includes('--output-format') && !a.includes('--allowedTools'));
+  assert.equal(flag(a, '--output-format'), 'stream-json');
+  assert.ok(a.includes('--verbose') && !a.includes('--allowedTools'));
 });
 
 function recorder() {
@@ -141,12 +142,12 @@ function recorder() {
 test('Claude runner: stream-json exposes the handshake, MCP tool calls with arguments, results and usage', async () => {
   const { cwd, argsFile } = work();
   const { seen, o } = recorder();
-  const runner = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly, observe: () => true, captureResults: true });
+  const runner = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly, captureResults: true });
   const chunks: string[] = [];
   const r = await runner.run(req(cwd, { env: { PATH: process.env.PATH!, FAKE_CLAUDE_ARGS: argsFile }, observer: o }), (c) => chunks.push(c));
   assert.equal(r.exitCode, 0);
   assert.equal(r.output, 'done', 'the final result text, as the plain mode gave');
-  assert.equal(chunks.join(''), 'done\n');
+  assert.equal(chunks.join(''), '> mcp__echo__echo\ndone\n', 'live text: one progress line per tool call, then the answer');
   const a = argsOf(argsFile);
   assert.deepEqual([flag(a, '--output-format'), a.includes('--verbose'), flag(a, '--allowedTools')], ['stream-json', true, 'mcp__echo__echo']);
   assert.deepEqual(JSON.parse(flag(a, '--mcp-config')!).mcpServers.echo.command, 'node');
@@ -162,7 +163,7 @@ test('Claude runner: stream-json exposes the handshake, MCP tool calls with argu
 test('Claude runner: a server that connects without being on the allow-list ends the run', async () => {
   const { cwd } = work();
   const { seen, o } = recorder();
-  const runner = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly, observe: () => true });
+  const runner = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly });
   const t0 = Date.now();
   const r = await runner.run(req(cwd, { env: { PATH: process.env.PATH!, FAKE_CLAUDE_ROGUE: '1' }, observer: o }));
   assert.ok(Date.now() - t0 < 4000);
@@ -183,7 +184,7 @@ function storeWithBead(cwd: string) {
 test('audit: handshakes and MCP tool calls land in the hash chain, attributed to the bead', async () => {
   const { cwd } = work();
   const store = storeWithBead(cwd);
-  const claude = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly, observe: () => true });
+  const claude = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly });
   const r = await new ObservedRunner(claude, { store }).run(req(cwd));
   assert.equal(r.exitCode, 0);
   const kinds = store.events(50).map((e) => e.kind).sort();
@@ -201,7 +202,7 @@ test('audit: a broken store never breaks a run', async () => {
   const { cwd } = work();
   const store = storeWithBead(cwd);
   store.log = () => { throw new Error('disk full'); };
-  const r = await new ObservedRunner(new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly, observe: () => true }), { store }).run(req(cwd));
+  const r = await new ObservedRunner(new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly }), { store }).run(req(cwd));
   assert.equal(r.exitCode, 0);
 });
 
@@ -240,7 +241,7 @@ test('OTel: one invoke_agent span with execute_tool children, GenAI attribute na
   const { cwd } = work();
   const store = storeWithBead(cwd);
   const exporter = new OtlpHttpExporter({ endpoint: col.url, flushIntervalMs: 60_000 });
-  const claude = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly, observe: () => true });
+  const claude = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly });
   const runner = new ObservedRunner(claude, { store, tracer: new Tracer(exporter) });
   await runner.run(req(cwd, { model: 'haiku' }));
   assert.equal(col.bodies.length, 0, 'nothing is sent until the batch is flushed');
@@ -289,7 +290,7 @@ test('OTel: content capture, when switched on, adds the opt-in attributes', asyn
   const col = await collector();
   const { cwd } = work();
   const exporter = new OtlpHttpExporter({ endpoint: `${col.url}/v1/traces` });
-  const claude = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly, observe: () => true, captureResults: true });
+  const claude = new ClaudeCodeRunner({ sandbox: NO_SANDBOX, command: FAKE_CLAUDE, mcp: echoOnly, captureResults: true });
   await new ObservedRunner(claude, { tracer: new Tracer(exporter), captureContent: true }).run(req(cwd));
   await exporter.shutdown();
   await col.close();
@@ -402,11 +403,11 @@ test('wiring: buildRunner routes, audits the ACP handshake and exports spans; fa
   assert.ok(buildRunner({ store, fake: true }).runner instanceof FakeRunner);
 });
 
-test('wiring: with no telemetry and no MCP, Claude Code is not switched to stream-json', async () => {
+test('wiring: with no telemetry and no MCP, Claude Code still reads stream-json (for usage) with MCP off', async () => {
   const { cwd, argsFile } = work();
   const bundle = buildRunner({ store: new Store(':memory:'), config: parseInterop(''), claudeCommand: FAKE_CLAUDE, sandbox: NO_SANDBOX });
-  const r = await bundle.runner.run(req(cwd, { env: { PATH: process.env.PATH!, FAKE_CLAUDE_ARGS: argsFile } }));
-  assert.equal(r.output.trim(), 'plain output');
-  assert.ok(!argsOf(argsFile).includes('--output-format'));
+  const r = await bundle.runner.run(req(cwd, { env: { PATH: process.env.PATH!, FAKE_CLAUDE_ARGS: argsFile, FAKE_CLAUDE_TRANSCRIPT: 'claude-stream-ok.jsonl' } }));
+  assert.equal(r.output.trim(), 'ok');
+  assert.equal(flag(argsOf(argsFile), '--mcp-config'), '{"mcpServers":{}}');
   await bundle.shutdown();
 });
