@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import {
-  addBead, addProject, approveBead, beadDiff, cancelBead, createGoal, decideApproval, editPlan, getProject, loadIdentities, loadLimits, loadPlanning, loadProjects,
+  addBead, addProject, answerClarification, approveBead, beadDiff, cancelBead, createGoal, decideApproval, editPlan, getProject, loadIdentities, loadLimits, loadPlanning, loadProjects,
   loadGithubHosts, loadReview, openVault, planRequest, rejectPlan, reviewGoal, setGithubHosts, tick, verifyPlans, OctetError, readRunOutput, reconcileRunning, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestChanges, requestDelivery, requestPrecomment, reviewBead, runBead, SEATS, type AgentRunner, type Ctx, type Forge, type Limits, type Store,
 } from '@octet/core';
 
@@ -108,6 +108,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     goals: store.listGoals(),
     requests: store.listRequests(),
     plans: store.listPlans(),
+    clarifications: store.listClarifications().filter((c) => !c.answers),
     escalations: store.listEscalations(true),
     planning: [...planning],
     approvals: store.listApprovals(),
@@ -224,9 +225,23 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
       planning.add(id);
       push('change', {});
       void planRequest(ctx, id)
-        .catch(() => { /* logged as planning.failed and escalated */ })
+        .catch(() => { /* failures are logged as planning.failed and escalated; questions show up as clarifications */ })
         .finally(() => { planning.delete(id); push('change', {}); });
       return json(202, { planning: id });
+    }
+    if ((m = path.match(/^\/api\/clarifications\/([\w-]+)\/answer$/)) && method === 'POST') {
+      const b = await readJson(req);
+      if (!Array.isArray(b.answers) || !b.answers.every((a) => typeof a === 'string')) throw new HttpError(400, '"answers" must be an array of strings');
+      const request = answerClarification(ctx, m[1]!, b.answers as string[]);
+      // Answers in: the Chair looks again and planning carries on, as it does for the PLAN button.
+      if (!planning.has(request.id)) {
+        planning.add(request.id);
+        push('change', {});
+        void planRequest(ctx, request.id)
+          .catch(() => { /* logged or asked again */ })
+          .finally(() => { planning.delete(request.id); push('change', {}); });
+      }
+      return json(202, { planning: request.id });
     }
     if ((m = path.match(/^\/api\/plans\/([\w-]+)$/)) && method === 'GET') {
       const rec = store.getPlan(m[1]!);

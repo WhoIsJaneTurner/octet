@@ -277,3 +277,50 @@ export function renderScout(r: ScoutReport, title: string): string {
     '## Unknowns (what the Scout could not determine)', bullets(r.unknowns), '',
   ].join('\n');
 }
+
+export type RequestSize = 'trivial' | 'small' | 'large';
+export const SIZE_ORDER: readonly RequestSize[] = ['trivial', 'small', 'large'];
+
+export interface ChairAssessment {
+  action: 'proceed' | 'clarify';
+  title: string;
+  size: RequestSize;
+  questions: string[];
+  assumptions: string[];
+}
+
+/** Asks only when the answer would change what gets built: at most three questions, and none unless clarifying. */
+export function validateChair(raw: unknown): Validated<ChairAssessment> {
+  const errors: string[] = [];
+  if (!isObj(raw)) return { ok: false, errors: ['The assessment must be a JSON object'] };
+  const action = raw.action;
+  if (action !== 'proceed' && action !== 'clarify') errors.push('"action" must be "proceed" or "clarify"');
+  const title = typeof raw.title === 'string' ? raw.title.trim() : '';
+  if (!title) errors.push('"title" is required');
+  const size = raw.size;
+  if (size !== 'trivial' && size !== 'small' && size !== 'large') errors.push('"size" must be "trivial", "small" or "large"');
+  const questions = strList(raw.questions ?? []);
+  const assumptions = strList(raw.assumptions ?? []);
+  if (!questions) errors.push('"questions" must be an array of strings');
+  if (!assumptions) errors.push('"assumptions" must be an array of strings');
+  if (questions && questions.length > 3) errors.push('Ask at most three questions; list the rest as assumptions');
+  if (action === 'clarify' && !questions?.length) errors.push('"questions" must be non-empty when action is "clarify"');
+  if (action === 'proceed' && questions?.length) errors.push('"questions" must be empty when action is "proceed"; use "clarify" to ask');
+  if (errors.length) return { ok: false, errors };
+  return { ok: true, value: { action: action as ChairAssessment['action'], title, size: size as RequestSize, questions: questions!, assumptions: assumptions! }, warnings: [] };
+}
+
+/**
+ * The model proposes a size; code can raise it, never lower it. A request that names several files or more
+ * than one directory is bumped one level, so a "trivial" label cannot skip planning on something large.
+ */
+export function effectiveSize(proposed: RequestSize, text: string, bumpFiles: number): { size: RequestSize; reason: string | null } {
+  const paths = new Set((text.match(/[\w.-]+\/[\w./-]+|\b[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|rb|go|rs|java|kt|swift|c|h|cpp|cs|php|sql|md|json|toml|ya?ml|css|html|sh)\b/g) ?? []).map((p) => p.replace(/[.,;:)]+$/, '')));
+  const dirs = new Set([...paths].filter((p) => p.includes('/')).map((p) => p.slice(0, p.lastIndexOf('/'))));
+  let reason: string | null = null;
+  if (paths.size > bumpFiles) reason = `the request names ${paths.size} files`;
+  else if (dirs.size > 1) reason = `the request spans ${dirs.size} directories`;
+  if (!reason) return { size: proposed, reason: null };
+  const i = SIZE_ORDER.indexOf(proposed);
+  return { size: SIZE_ORDER[Math.min(i + 1, SIZE_ORDER.length - 1)]!, reason };
+}

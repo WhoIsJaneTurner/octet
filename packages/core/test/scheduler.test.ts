@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  approveBead, cancelBead, decideApproval, decide, planRequest, reviewBead, reviewGoal, runBead, tick, type Ctx, type SchedHooks,
+  approveBead, cancelBead, DEFAULT_PLANNING, decideApproval, decide, planRequest, reviewBead, reviewGoal, runBead, tick, type Ctx, type SchedHooks,
 } from '../src/index.ts';
 import { bead, planJson, routed, setup } from './helpers.ts';
 
@@ -115,7 +115,7 @@ test('the engineer cap holds: independent beads start one at a time, oldest firs
 });
 
 test('a failing bead is retried up to the limit, then escalates once and stops', async () => {
-  const { ctx, runner, d, byItem, rec } = await approvedGoal({ beads: [bead('b1')], planning: { maxBeads: 12, maxPoints: 36, maxRunsFactor: 10, maxRetries: 2, capWaitMinutes: 30 } });
+  const { ctx, runner, d, byItem, rec } = await approvedGoal({ beads: [bead('b1')], planning: { ...DEFAULT_PLANNING, maxRunsFactor: 10, maxRetries: 2 } });
   runner.exit.set('engineer', 1);
   await d.settle();
   assert.equal(ctx.store.countEvents('bead.failed', byItem('b1').id), 3); // first try + 2 retries
@@ -133,7 +133,7 @@ test('a failing bead is retried up to the limit, then escalates once and stops',
 });
 
 test('the per-goal run ceiling stops new engineer runs and escalates', async () => {
-  const { ctx, runner, d, byItem } = await approvedGoal({ beads: [bead('b1')], planning: { maxBeads: 12, maxPoints: 36, maxRunsFactor: 2, maxRetries: 9, capWaitMinutes: 30 } });
+  const { ctx, runner, d, byItem } = await approvedGoal({ beads: [bead('b1')], planning: { ...DEFAULT_PLANNING, maxRunsFactor: 2, maxRetries: 9 } });
   runner.exit.set('engineer', 1);
   await d.settle();
   assert.equal(ctx.store.lastRun(byItem('b1').id)!.n, 2); // 2 runs = 2 x 1 bead

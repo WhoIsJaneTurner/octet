@@ -181,6 +181,10 @@ export class Vault {
     return { plan: JSON.parse(raw.toString('utf8')) as Plan, hash: sha256(raw) };
   }
 
+  readJson<T>(rel: string): T {
+    return JSON.parse(this.read(rel)) as T;
+  }
+
   /** Hash of the plan JSON on disk now, or null if the file is gone. */
   currentHash(slug: string, version: number): string | null {
     const rel = planFile(slug, version, 'json');

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api } from './api';
-import type { Approval, Escalation, Goal, PlanSummary } from './types';
+import type { Approval, Clarification, Escalation, Goal, PlanSummary } from './types';
 import { Box, IdentityTag } from './ui';
 
 /** The Warden's inbox: every outbound action waits here with its exact target, account and diff. */
@@ -144,6 +144,39 @@ export function Escalations({ escalations, goals, onDone, setError }: {
           <span className="amber">! {e.reason.replace(/_/g, ' ')}</span>
           <span>{goals.find((g) => g.id === e.goalId)?.title ?? e.goalId}{e.beadId ? ` / ${e.beadId}` : ''}: {e.message}</span>
           <button onClick={() => void resolve(e.id)}>DISMISS</button>
+        </div>
+      ))}
+    </Box>
+  );
+}
+
+/** The Chair asks only when the answer would change what gets built. */
+export function Clarifications({ items, goals, onDone, setError }: {
+  items: Clarification[]; goals: Goal[]; onDone: () => void; setError: (m: string | null) => void;
+}) {
+  const [answers, setAnswers] = useState<Record<string, string[]>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  if (!items.length) return null;
+  const send = async (c: Clarification) => {
+    setBusy(c.id); setError(null);
+    try { await api(`/api/clarifications/${c.id}/answer`, { answers: c.questions.map((_, i) => answers[c.id]?.[i] ?? '') }); }
+    catch (e) { setError((e as Error).message); } finally { setBusy(null); onDone(); }
+  };
+  return (
+    <Box title={`Questions from the Chair (${items.length})`}>
+      {items.map((c) => (
+        <div key={c.id} className="box" style={{ marginTop: 12 }}>
+          <h3>{goals.find((g) => g.id === c.goalId)?.title ?? c.goalId}</h3>
+          {c.questions.map((q, i) => (
+            <div key={i}>
+              <label htmlFor={`cq-${c.id}-${i}`}>{i + 1}. {q}</label>
+              <textarea id={`cq-${c.id}-${i}`} rows={2} value={answers[c.id]?.[i] ?? ''}
+                onChange={(e) => setAnswers({ ...answers, [c.id]: c.questions.map((_, j) => (j === i ? e.target.value : answers[c.id]?.[j] ?? '')) })} />
+            </div>
+          ))}
+          <div className="row">
+            <button disabled={busy === c.id || c.questions.some((_, i) => !(answers[c.id]?.[i] ?? '').trim())} onClick={() => void send(c)}>ANSWER AND CONTINUE PLANNING</button>
+          </div>
         </div>
       ))}
     </Box>

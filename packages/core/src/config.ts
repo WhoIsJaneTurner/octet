@@ -63,9 +63,11 @@ export interface PlanningConfig {
   maxRetries: number;
   /** Minutes a runnable bead may wait on the engineer cap before the scheduler escalates. */
   capWaitMinutes: number;
+  /** A request naming more files than this is planned one size larger than the Chair judged. */
+  bumpFiles: number;
 }
 
-export const DEFAULT_PLANNING: PlanningConfig = { maxBeads: 12, maxPoints: 36, maxRunsFactor: 3, maxRetries: 2, capWaitMinutes: 30 };
+export const DEFAULT_PLANNING: PlanningConfig = { maxBeads: 12, maxPoints: 36, maxRunsFactor: 3, maxRetries: 2, capWaitMinutes: 30, bumpFiles: 3 };
 
 /** Reads `[planning]` from config.toml. Missing file or keys use defaults. */
 export function loadPlanning(file: string = join(octetHome(), 'config.toml')): PlanningConfig {
@@ -77,6 +79,7 @@ export function loadPlanning(file: string = join(octetHome(), 'config.toml')): P
     maxRunsFactor: positive(t.max_runs_factor, DEFAULT_PLANNING.maxRunsFactor),
     maxRetries: typeof t.max_retries === 'number' && Number.isInteger(t.max_retries) && t.max_retries >= 0 ? t.max_retries : DEFAULT_PLANNING.maxRetries,
     capWaitMinutes: positive(t.cap_wait_minutes, DEFAULT_PLANNING.capWaitMinutes),
+    bumpFiles: positive(t.bump_files, DEFAULT_PLANNING.bumpFiles),
   };
 }
 

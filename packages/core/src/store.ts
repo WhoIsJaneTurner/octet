@@ -55,6 +55,18 @@ export interface PlanRecord {
   decidedAt: string | null;
 }
 
+/** Questions the Chair asked before planning; answers are appended to the request and planning resumes. */
+export interface Clarification {
+  id: string;
+  requestId: string;
+  goalId: string;
+  round: number;
+  questions: string[];
+  answers: string[] | null;
+  createdAt: string;
+  answeredAt: string | null;
+}
+
 export interface Escalation {
   id: string;
   goalId: string;
@@ -179,6 +191,10 @@ CREATE TABLE IF NOT EXISTS escalations (
   id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, bead_id TEXT, reason TEXT NOT NULL, message TEXT NOT NULL,
   created_at TEXT NOT NULL, resolved_at TEXT
 );
+CREATE TABLE IF NOT EXISTS clarifications (
+  id TEXT PRIMARY KEY, request_id TEXT NOT NULL, goal_id TEXT NOT NULL, round INTEGER NOT NULL, questions TEXT NOT NULL,
+  answers TEXT, created_at TEXT NOT NULL, answered_at TEXT
+);
 CREATE TABLE IF NOT EXISTS requests (
   id TEXT PRIMARY KEY, source TEXT NOT NULL, external_ref TEXT, project TEXT, title TEXT NOT NULL,
   body TEXT NOT NULL, requester TEXT NOT NULL, status TEXT NOT NULL, reject_reason TEXT, goal_id TEXT,
@@ -242,6 +258,11 @@ const toPlan = (r: Row): PlanRecord => ({
   id: r.id as string, goalId: r.goal_id as string, requestId: r.request_id as string | null, version: r.version as number,
   status: r.status as PlanStatus, vaultPath: r.vault_path as string, contentHash: r.content_hash as string,
   createdAt: r.created_at as string, decidedAt: r.decided_at as string | null,
+});
+const toClarification = (r: Row): Clarification => ({
+  id: r.id as string, requestId: r.request_id as string, goalId: r.goal_id as string, round: r.round as number,
+  questions: JSON.parse(r.questions as string) as string[], answers: r.answers ? (JSON.parse(r.answers as string) as string[]) : null,
+  createdAt: r.created_at as string, answeredAt: r.answered_at as string | null,
 });
 const toEscalation = (r: Row): Escalation => ({
   id: r.id as string, goalId: r.goal_id as string, beadId: r.bead_id as string | null, reason: r.reason as string,
@@ -393,6 +414,32 @@ export class Store {
     return id;
   }
 
+  insertClarification(c: { requestId: string; goalId: string; round: number; questions: string[] }): Clarification {
+    const row: Clarification = { id: newId('clar'), ...c, answers: null, createdAt: now(), answeredAt: null };
+    this.db.prepare('INSERT INTO clarifications VALUES (?,?,?,?,?,?,?,?)')
+      .run(row.id, row.requestId, row.goalId, row.round, JSON.stringify(row.questions), null, row.createdAt, null);
+    this.changed();
+    return row;
+  }
+
+  getClarification(id: string): Clarification | undefined {
+    const r = this.db.prepare('SELECT * FROM clarifications WHERE id = ?').get(id) as Row | undefined;
+    return r && toClarification(r);
+  }
+
+  listClarifications(requestId?: string): Clarification[] {
+    const rows = requestId
+      ? (this.db.prepare('SELECT * FROM clarifications WHERE request_id = ? ORDER BY round').all(requestId) as Row[])
+      : (this.db.prepare('SELECT * FROM clarifications ORDER BY created_at, rowid').all() as Row[]);
+    return rows.map(toClarification);
+  }
+
+  answerClarification(id: string, answers: string[]): boolean {
+    const res = this.db.prepare('UPDATE clarifications SET answers = ?, answered_at = ? WHERE id = ? AND answers IS NULL').run(JSON.stringify(answers), now(), id);
+    this.changed();
+    return Number(res.changes) === 1;
+  }
+
   /** Opens an escalation unless an identical one is already open (the scheduler calls this every tick). */
   escalate(e: { goalId: string; beadId?: string; reason: string; message: string }): Escalation | undefined {
     const open = this.db
@@ -478,13 +525,14 @@ export class Store {
     return (this.db.prepare('SELECT * FROM requests ORDER BY created_at DESC, rowid DESC').all() as Row[]).map(toRequest);
   }
 
-  updateRequest(id: string, patch: { project?: string; status?: RequestStatus; rejectReason?: string; goalId?: string }): void {
+  updateRequest(id: string, patch: { project?: string; status?: RequestStatus; rejectReason?: string; goalId?: string; body?: string }): void {
     const sets: string[] = [];
     const vals: (string | null)[] = [];
     if (patch.project !== undefined) { sets.push('project = ?'); vals.push(patch.project); }
     if (patch.status !== undefined) { sets.push('status = ?'); vals.push(patch.status); }
     if (patch.rejectReason !== undefined) { sets.push('reject_reason = ?'); vals.push(patch.rejectReason); }
     if (patch.goalId !== undefined) { sets.push('goal_id = ?'); vals.push(patch.goalId); }
+    if (patch.body !== undefined) { sets.push('body = ?'); vals.push(patch.body); }
     if (!sets.length) return;
     this.db.prepare(`UPDATE requests SET ${sets.join(', ')} WHERE id = ?`).run(...vals, id);
     this.changed();

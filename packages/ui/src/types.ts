@@ -12,7 +12,7 @@ export interface OctetEvent {
   id: number; ts: string; kind: string; goalId: string | null; beadId: string | null; seat: string | null; data: unknown;
 }
 export interface State {
-  seats: Seat[]; identities: Identity[]; projects: Project[]; goals: Goal[]; requests: Request[]; plans: PlanRecord[]; escalations: Escalation[]; planning: string[]; planAudit: { ok: boolean; checked: number; problems: { plan: string; problem: string }[] }; beads: Bead[];
+  seats: Seat[]; identities: Identity[]; projects: Project[]; goals: Goal[]; requests: Request[]; plans: PlanRecord[]; clarifications: Clarification[]; escalations: Escalation[]; planning: string[]; planAudit: { ok: boolean; checked: number; problems: { plan: string; problem: string }[] }; beads: Bead[];
   events: OctetEvent[]; running: string[];
   reviewing: string[]; review: { auto: boolean; autoMerge: boolean; maxRounds: number }; approvals: Approval[]; prs: PullRequest[]; limits: { maxEngineers: number; maxActiveGoals: number }; audit: ChainCheck;
 }
@@ -45,3 +45,4 @@ export interface PlanSummary {
   planId: string; version: number; hash: string; approach: string; assumptions: string[]; notDoing: string[]; risks: string[];
   verification: string[]; warnings: string[]; beads: PlanBead[];
 }
+export interface Clarification { id: string; requestId: string; goalId: string; round: number; questions: string[]; answers: string[] | null; createdAt: string }

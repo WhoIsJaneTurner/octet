@@ -2,8 +2,8 @@
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import {
-  addBead, addProject, approveBead, cancelBead, ClaudeCodeRunner, createGoal, dbFile, decideApproval, editPlan, FakeRunner, getIdentity,
-  ghToken, loadIdentities, loadLimits, loadProjects, loadGithubHosts, loadPlanning, loadReview, setGithubHosts, OctetError, openVault, planRequest, rejectPlan, rejectRequest, renderPlan, updateProject, verifyPlans, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
+  addBead, addProject, answerClarification, approveBead, cancelBead, ClaudeCodeRunner, createGoal, dbFile, decideApproval, editPlan, FakeRunner, getIdentity,
+  ghToken, loadIdentities, loadLimits, loadProjects, ClarificationNeeded, loadGithubHosts, loadPlanning, loadReview, setGithubHosts, OctetError, openVault, planRequest, rejectPlan, rejectRequest, renderPlan, updateProject, verifyPlans, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
 } from '@octet/core';
 
 const USAGE = `octet <command>
@@ -18,6 +18,7 @@ const USAGE = `octet <command>
   request route <id> <project>      pick the project for an unrouted request
   request reject <id> <reason>      decline a request; nothing else is created
   request plan <id>                 have the Architect write a plan (needs a project vault)
+  clarification list|answer <id> <answer>...   the Chair's questions, and your answers
   plan list                         plans and where they stand
   plan show <id>                    print a plan
   plan approve <id>                 approve it; the Marshal creates its beads
@@ -152,13 +153,34 @@ async function main(argv: string[]): Promise<void> {
       const [id] = rest;
       if (!id) throw new OctetError('usage: request plan <id>');
       console.log('The Architect is reading the repository and writing a plan. This can take a few minutes...');
-      const rec = await planRequest(makeCtx(Boolean(values.fake)), id);
+      const ctx = makeCtx(Boolean(values.fake));
+      const rec = await planRequest(ctx, id).catch((e: unknown) => {
+        if (!(e instanceof ClarificationNeeded)) throw e;
+        const c = e.clarification;
+        console.log(`The Chair needs answers first (${c.id}):\n${c.questions.map((q, i) => `  ${i + 1}. ${q}`).join('\n')}\nAnswer with: octet clarification answer ${c.id} "answer 1" "answer 2" ...   then: octet request plan ${id}`);
+        return undefined;
+      });
+      if (!rec) return;
       return void console.log(`plan ${rec.id} v${rec.version} is waiting for you (hash ${rec.contentHash.slice(0, 12)}).\nRead it: octet plan show ${rec.id}\nThen: octet plan approve ${rec.id}   or   octet plan reject ${rec.id} "what to change"`);
     }
     if (cmd === 'reject') {
       const [id, ...reason] = rest;
       if (!id || !reason.length) throw new OctetError('usage: request reject <id> <reason>');
       return void console.log(`request ${rejectRequest(ctx, id, reason.join(' ')).id}: rejected`);
+    }
+  }
+
+  if (group === 'clarification') {
+    const ctx = makeCtx(true);
+    if (cmd === 'list') {
+      for (const c of ctx.store.listClarifications().filter((x) => !x.answers)) console.log(`${c.id}  request ${c.requestId}\n${c.questions.map((q, i) => `  ${i + 1}. ${q}`).join('\n')}`);
+      return;
+    }
+    if (cmd === 'answer') {
+      const [id, ...answers] = rest;
+      if (!id) throw new OctetError('usage: clarification answer <id> <answer>...');
+      const r = answerClarification(ctx, id, answers);
+      return void console.log(`recorded. Continue with: octet request plan ${r.id}`);
     }
   }
 

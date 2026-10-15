@@ -7,11 +7,12 @@ import { childEnv } from './identity.ts';
 import { addBead, createGoal, projectInstructions, type Ctx } from './orchestrate.ts';
 import { loadPersona } from './personas.ts';
 import {
-  extractJson, renderPlan, topoOrder, validatePlan, type Plan, type PlanBead, type PlanLimits, type Validated,
+  effectiveSize, extractJson, renderPlan, renderScout, topoOrder, validateChair, validatePlan, validateScout, type ChairAssessment, type Plan,
+  type PlanBead, type PlanLimits, type RequestSize, type ScoutReport, type Validated,
 } from './plan.ts';
 import { getProject, type Project } from './project.ts';
 import type { SeatId } from './seats.ts';
-import { newId, type Approval, type Bead, type Goal, type PlanRecord, type Request } from './store.ts';
+import { newId, type Approval, type Bead, type Clarification, type Goal, type PlanRecord, type Request } from './store.ts';
 import { openVault, Vault } from './vault.ts';
 
 // ---------------------------------------------------------------------------------------------
@@ -93,8 +94,8 @@ function vaultFor(ctx: Ctx, projectName: string): Vault {
 // Architect and the plan gate
 // ---------------------------------------------------------------------------------------------
 
-function architectPrompt(ctx: Ctx, req: Request, goal: Goal, vault: Vault, assumptions: string[], feedback?: string, scout?: string): string {
-  const related = vault.relatedPlans({ title: req.title }, 3);
+function architectPrompt(ctx: Ctx, req: Request, goal: Goal, vault: Vault, assumptions: string[], feedback?: string, scout?: string, scoutFiles: string[] = []): string {
+  const related = vault.relatedPlans({ title: req.title, files: scoutFiles }, 3);
   const pinned = vault.pinnedLessons();
   const rules = projectInstructions(goal.worktree);
   const limits = planLimits(ctx);
@@ -154,9 +155,86 @@ function planningFailed(ctx: Ctx, goal: Goal, e: unknown): never {
   throw e;
 }
 
+/** Thrown by `planRequest` when the Chair needs answers first. Planning resumes when they are given. */
+export class ClarificationNeeded extends OctetError {
+  readonly clarification: Clarification;
+  constructor(c: Clarification) {
+    super(`The Chair has ${c.questions.length} question(s) before planning can start: ${c.questions.join(' | ')}`);
+    this.clarification = c;
+  }
+}
+
+const MAX_CLARIFY_ROUNDS = 2;
+
+function chairPrompt(req: Request, goal: Goal, rounds: number): string {
+  const rules = projectInstructions(goal.worktree);
+  return [
+    `# Assess this request for project "${goal.project}"`,
+    '', dataBlock('request title', req.title), dataBlock('request body', req.body || '(no details given)'),
+    ...(rules ? ['', dataBlock('AGENTS.md', rules)] : []),
+    ...(rounds >= MAX_CLARIFY_ROUNDS ? ['', `You have already asked ${rounds} rounds of questions. Do not ask again: proceed and list what you assumed.`] : []),
+  ].join('\n');
+}
+
+/** Chair: ask only when the answer would change what gets built; otherwise proceed with stated assumptions. */
+async function chairAssess(ctx: Ctx, req: Request, goal: Goal): Promise<ChairAssessment> {
+  const rounds = ctx.store.listClarifications(req.id).length;
+  const { value } = await runStructured(ctx, { seat: 'chair', goal, validate: validateChair, prompt: chairPrompt(req, goal, rounds) });
+  // Enough rounds: fold the unanswered questions into assumptions instead of asking forever.
+  const out: ChairAssessment = value.action === 'clarify' && rounds >= MAX_CLARIFY_ROUNDS
+    ? { ...value, action: 'proceed', assumptions: [...value.assumptions, ...value.questions.map((q) => `Unclear, assumed the simplest reading: ${q}`)], questions: [] }
+    : value;
+  const eff = effectiveSize(out.size, `${req.title}\n${req.body}`, ctx.planning?.bumpFiles ?? DEFAULT_PLANNING.bumpFiles);
+  // Only a decision to proceed is remembered. Questions are not: once answered, the Chair looks again with the answers.
+  if (out.action === 'proceed') ctx.store.log({ kind: 'chair.assessed', goalId: goal.id, seat: 'chair', data: { ...out, effectiveSize: eff.size, bumped: eff.reason, round: rounds } });
+  return { ...out, size: eff.size };
+}
+
+/** The last stored assessment for a goal (a re-plan after feedback reuses it instead of asking again). */
+function priorAssessment(ctx: Ctx, goalId: string): ChairAssessment | undefined {
+  const e = ctx.store.lastGoalEvent('chair.assessed', goalId);
+  if (!e) return undefined;
+  const d = e.data as ChairAssessment & { effectiveSize: RequestSize };
+  return { action: 'proceed', title: d.title, size: d.effectiveSize, questions: [], assumptions: d.assumptions };
+}
+
+/** Scout: reads the repository and reports what is true, including what it could not determine. */
+async function scoutRun(ctx: Ctx, req: Request, goal: Goal, vault: Vault, slug: string, chair: ChairAssessment): Promise<ScoutReport> {
+  const rules = projectInstructions(goal.worktree);
+  const prompt = [
+    `# Investigate before planning, for project "${goal.project}"`,
+    chair.size === 'large' ? 'Be thorough: this request spans several areas.' : 'Keep it short: this is a small change.',
+    '', dataBlock('request title', req.title), dataBlock('request body', req.body || '(no details given)'),
+    ...(chair.assumptions.length ? ['', '## Assumptions so far', ...chair.assumptions.map((a) => `- ${a}`)] : []),
+    ...(rules ? ['', dataBlock('AGENTS.md', rules)] : []),
+  ].join('\n');
+  const { value } = await runStructured(ctx, { seat: 'scout', goal, validate: validateScout, prompt });
+  const saved = vault.saveScout(slug, value, { goalId: goal.id, title: goal.title });
+  ctx.store.insertScout({ goalId: goal.id, vaultPath: `plans/${slug}`, contentHash: saved.hash });
+  ctx.store.log({ kind: 'scout.saved', goalId: goal.id, seat: 'scout', data: { hash: saved.hash, files: value.relevantFiles.length, unknowns: value.unknowns.length, redacted: saved.redacted } });
+  return value;
+}
+
+/** A trivial change skips the Scout and Architect: one bead, still shown at the plan gate as a one-line plan. */
+function trivialPlan(req: Request, assumptions: string[]): Plan {
+  return {
+    approach: req.title,
+    assumptions,
+    notDoing: ['Anything beyond what the request asks for'],
+    risks: [],
+    verification: ['Read the diff and run the project\'s tests'],
+    beads: [{
+      id: 'b1', title: req.title, objective: req.body.trim() || req.title, files: [],
+      acceptance: ['The change described in the request is made', 'Existing tests still pass'], outOfScope: [], dependsOn: [], size: 's',
+    }],
+  };
+}
+
 /**
- * Turns a routed request into a stored, approvable plan. Creates the goal (status `planning`) on the first
- * call; calling again after a failure or a plain denial plans another version.
+ * Turns a routed request into a stored, approvable plan: Chair (ask or proceed, size), Scout (unless trivial),
+ * Architect (or a one-bead plan when trivial). Creates the goal (status `planning`) on the first call; calling again
+ * after a failure, a plain denial or answered questions continues from the same goal. Throws `ClarificationNeeded`
+ * when the Chair has questions.
  */
 export async function planRequest(ctx: Ctx, requestId: string, opts: { feedback?: string } = {}): Promise<PlanRecord> {
   const req = ctx.store.getRequest(requestId);
@@ -170,6 +248,9 @@ export async function planRequest(ctx: Ctx, requestId: string, opts: { feedback?
   if (goal && ctx.store.listPlans(goal.id).some((p) => p.status === 'awaiting_approval')) {
     throw new OctetError(`Goal ${goal.id} already has a plan waiting for approval`);
   }
+  if (goal && ctx.store.listClarifications(req.id).some((c) => !c.answers)) {
+    throw new OctetError(`The Chair is still waiting for your answers on request ${requestId}`);
+  }
   if (!goal) {
     goal = createGoal(ctx, { project: project.name, title: req.title, status: 'planning' });
     ctx.store.updateRequest(req.id, { status: 'planning', goalId: goal.id });
@@ -178,23 +259,60 @@ export async function planRequest(ctx: Ctx, requestId: string, opts: { feedback?
     ctx.store.setGoalStatus(goal.id, 'planning');
     ctx.store.updateRequest(req.id, { status: 'planning' });
   }
+  const current = ctx.store.getRequest(req.id)!; // answers may have been appended to the body
   const prior = ctx.store.listPlans(goal.id);
   const slug = prior.length ? slugOf(prior[0]!) : vault.planSlug(req.title);
-  if (!prior.length) {
-    const saved = vault.saveRequest(slug, req);
-    if (saved.redacted) ctx.store.log({ kind: 'vault.redacted', goalId: goal.id, data: { request: req.id, count: saved.redacted } });
-  }
+  const saved = vault.saveRequest(slug, current);
+  if (saved.redacted && !prior.length) ctx.store.log({ kind: 'vault.redacted', goalId: goal.id, data: { request: req.id, count: saved.redacted } });
   ctx.store.resolveEscalationsFor(goal.id);
 
   try {
+    let chair = priorAssessment(ctx, goal.id);
+    if (!chair) {
+      const assessed = await chairAssess(ctx, current, goal);
+      if (assessed.action === 'clarify') {
+        const clar = ctx.store.insertClarification({ requestId: req.id, goalId: goal.id, round: ctx.store.listClarifications(req.id).length + 1, questions: assessed.questions });
+        ctx.store.log({ kind: 'chair.clarify', goalId: goal.id, seat: 'chair', data: { clarification: clar.id, questions: clar.questions } });
+        throw new ClarificationNeeded(clar);
+      }
+      chair = assessed;
+    }
+
+    if (chair.size === 'trivial') {
+      ctx.store.log({ kind: 'planning.trivial', goalId: goal.id, seat: 'chair', data: { reason: 'one-bead plan, no Scout or Architect' } });
+      return propose(ctx, { goal, req: current, vault, slug, plan: trivialPlan(current, chair.assumptions), warnings: [], version: nextVersion(ctx, goal.id), note: 'trivial change, single bead' });
+    }
+
+    let scout: ScoutReport | undefined;
+    if (vault.has(`plans/${slug}/scout.json`)) scout = vault.readJson<ScoutReport>(`plans/${slug}/scout.json`);
+    else scout = await scoutRun(ctx, current, goal, vault, slug, chair);
+
+    const limits = { ...planLimits(ctx), ...(chair.size === 'small' ? { maxBeads: Math.min(3, planLimits(ctx).maxBeads) } : {}) };
     const { value: plan, warnings } = await runStructured(ctx, {
-      seat: 'architect', goal, validate: (raw) => validatePlan(raw, planLimits(ctx)),
-      prompt: architectPrompt(ctx, req, goal, vault, [], opts.feedback),
+      seat: 'architect', goal, validate: (raw) => validatePlan(raw, limits),
+      prompt: architectPrompt(ctx, current, goal, vault, chair.assumptions, opts.feedback, renderScout(scout, goal.title), scout.relevantFiles.map((f) => f.path)),
     });
-    return propose(ctx, { goal, req, vault, slug, plan, warnings, version: nextVersion(ctx, goal.id), note: opts.feedback ? 'revised after feedback' : 'first draft' });
+    // The Chair's assumptions are approved with the plan even if the Architect did not repeat them.
+    plan.assumptions = [...new Set([...chair.assumptions, ...plan.assumptions])];
+    return propose(ctx, { goal, req: current, vault, slug, plan, warnings, version: nextVersion(ctx, goal.id), note: opts.feedback ? 'revised after feedback' : 'first draft' });
   } catch (e) {
+    if (e instanceof ClarificationNeeded) throw e;
     return planningFailed(ctx, goal, e);
   }
+}
+
+/** Records your answers on the request and the vault. Planning resumes with `planRequest`. */
+export function answerClarification(ctx: Ctx, clarificationId: string, answers: string[]): Request {
+  const c = ctx.store.getClarification(clarificationId);
+  if (!c) throw new OctetError(`Unknown clarification "${clarificationId}"`);
+  if (c.answers) throw new OctetError(`Clarification ${clarificationId} was already answered`);
+  if (answers.length !== c.questions.length || answers.some((a) => !a.trim())) throw new OctetError(`Answer all ${c.questions.length} question(s)`);
+  const req = ctx.store.getRequest(c.requestId)!;
+  const qa = c.questions.map((q, i) => `Q: ${q}\nA: ${answers[i]!.trim()}`).join('\n\n');
+  if (!ctx.store.answerClarification(c.id, answers.map((a) => a.trim()))) throw new OctetError(`Clarification ${clarificationId} was already answered`);
+  ctx.store.updateRequest(req.id, { body: `${req.body}${req.body ? '\n\n' : ''}## Answers to the Chair's questions (round ${c.round})\n${qa}` });
+  ctx.store.log({ kind: 'chair.answered', goalId: c.goalId, data: { clarification: c.id, request: req.id } });
+  return ctx.store.getRequest(req.id)!;
 }
 
 function pendingPlanApproval(ctx: Ctx, planId: string): Approval | undefined {

@@ -11,6 +11,8 @@ import { startDaemon, type Daemon } from '../src/server.ts';
 let d: Daemon;
 const forge = new FakeForge();
 const runner = new FakeRunner();
+runner.replies.chair = JSON.stringify({ action: 'proceed', title: 'T', size: 'small', questions: [], assumptions: [] });
+runner.replies.scout = JSON.stringify({ summary: 's', relevant_files: [], conventions: [], build_and_test: [], risks: [], unknowns: ['u'] });
 let runsDir: string;
 let repo: string;
 const base = () => `http://127.0.0.1:${d.port}`;
@@ -237,4 +239,22 @@ test('rejecting a plan with feedback over HTTP re-plans; pausing a goal and reso
   assert.equal((await post(`/api/goals/${v1.goalId}/pause`)).body.paused, true);
   assert.equal((await post(`/api/goals/${v1.goalId}/resume`)).body.paused, false);
   assert.equal((await post('/api/escalations/esc-nope/resolve')).status, 404);
+});
+
+test('the Chair\'s questions over HTTP: planning pauses, answers resume it', async () => {
+  const post = (path: string, body: unknown = {}) => call(path, { method: 'POST', body: JSON.stringify(body) });
+  const one = [{ id: 'b1', title: 'Only', objective: 'o', files: [], acceptance: ['a'], out_of_scope: [], depends_on: [], size: 'xs' }];
+  runner.script('chair', [JSON.stringify({ action: 'clarify', title: 'T', size: 'small', questions: ['Which one?'], assumptions: [] })]);
+  runner.script('architect', [JSON.stringify({ approach: 'After the answer.', not_doing: ['x'], risks: [], verification: ['v'], beads: one })]);
+  const r = (await post('/api/requests', { title: 'Ambiguous', project: 'demo' })).body;
+  await post(`/api/requests/${r.id}/plan`);
+  await waitFor(async () => (await call('/api/state')).body.clarifications.some((c: any) => c.requestId === r.id));
+  const clar = (await call('/api/state')).body.clarifications.find((c: any) => c.requestId === r.id);
+  assert.deepEqual(clar.questions, ['Which one?']);
+  assert.equal((await post(`/api/clarifications/${clar.id}/answer`, { answers: [] })).status, 400);
+  assert.equal((await post(`/api/clarifications/${clar.id}/answer`, { answers: ['The first'] })).status, 202);
+  await waitFor(async () => (await call('/api/state')).body.plans.some((p: any) => p.requestId === r.id && p.status === 'awaiting_approval'));
+  const st = (await call('/api/state')).body;
+  assert.equal(st.clarifications.some((c: any) => c.requestId === r.id), false); // answered ones are not listed
+  assert.match(st.requests.find((x: any) => x.id === r.id).body, /A: The first/);
 });

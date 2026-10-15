@@ -43,10 +43,13 @@ function seatLine(id: string, s: State): SeatLine {
         : waiting ? { state: 'WAITING ON YOU', cls: 'cyan', note: `${waiting} plan${waiting > 1 ? 's' : ''} to approve in the inbox` }
           : { state: 'IDLE', cls: 'dim', note: 'plans a routed request when you press PLAN (needs a project vault)' };
     }
+    case 'scout': return { state: 'ON CALL', cls: 'dim', note: 'reads the repo before the Architect plans; its report is stored in the vault' };
     case 'chair': {
       const n = s.requests.filter((r) => r.status === 'new').length;
-      return n ? { state: 'WAITING ON YOU', cls: 'cyan', note: `${n} request${n > 1 ? 's' : ''} to route` }
-        : { state: 'INTAKE', cls: 'dim', note: 'takes typed requests; clarifying questions are not built yet' };
+      const q = s.clarifications.length;
+      return q ? { state: 'WAITING ON YOU', cls: 'cyan', note: `${q} question${q > 1 ? 's' : ''} before planning can start` }
+        : n ? { state: 'WAITING ON YOU', cls: 'cyan', note: `${n} request${n > 1 ? 's' : ''} to route` }
+          : { state: 'INTAKE', cls: 'dim', note: 'sizes each request, asks only what changes the plan, and sends trivial changes straight to a one-bead plan' };
     }
     default: return { state: 'NOT BUILT', cls: 'faint', note: 'persona written, no runtime yet' };
   }

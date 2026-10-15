@@ -23,6 +23,9 @@ export function setup(over: Partial<Project> = {}, ctxOver: Partial<Ctx> = {}) {
   g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init');
   g('remote', 'add', 'origin', 'git@github.com:WhoIsJaneTurner/demo.git');
   const runner = new FakeRunner();
+  // Sensible defaults so a test only scripts what it cares about.
+  runner.replies.chair = chairJson();
+  runner.replies.scout = scoutJson();
   const project: Project = { name: 'demo', path: repo, identity: 'wijt', vault, ...over };
   const ctx: Ctx = {
     store: new Store(':memory:'), identities: parseIdentities(IDS), runner, projects: [project],
@@ -30,6 +33,15 @@ export function setup(over: Partial<Project> = {}, ctxOver: Partial<Ctx> = {}) {
   };
   return { ctx, runner, repo, vault, project };
 }
+
+export const chairJson = (over: Record<string, unknown> = {}) =>
+  JSON.stringify({ action: 'proceed', title: 'Add the thing', size: 'small', questions: [], assumptions: [], ...over });
+
+export const scoutJson = (over: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    summary: 'Small, self-contained change.', relevant_files: [{ path: 'a.txt', why: 'the only file' }], conventions: ['plain text'],
+    build_and_test: ['none'], risks: [], unknowns: ['No tests exist'], ...over,
+  });
 
 export const bead = (id: string, extra: Record<string, unknown> = {}) => ({
   id, title: `Bead ${id}`, objective: `Do ${id}`, files: [`src/${id}.ts`], acceptance: [`${id} works`],

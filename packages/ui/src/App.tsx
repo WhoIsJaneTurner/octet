@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { api, useOctet } from './api';
 import { Detail } from './Detail';
-import { Escalations, Inbox } from './Approvals';
+import { Clarifications, Escalations, Inbox } from './Approvals';
 import { NewRequest, RequestList } from './Requests';
 import { Board, Council, Log, PrCard } from './views';
 import { IdentityTag } from './ui';
@@ -103,6 +103,7 @@ export function App() {
         <span className={state.running.length ? 'amber' : 'dim'}>{state.running.length}/{state.limits.maxEngineers} running</span>
         <span className={state.audit.ok ? 'dim' : 'red'} title={state.audit.ok ? `head ${state.audit.head.slice(0, 12)}` : state.audit.reason}>{state.audit.ok ? `audit ✔ ${state.audit.checked}` : '✖ AUDIT CHAIN BROKEN'}</span>
         {state.requests.some((r) => r.status === 'new') && <span className="cyan">? {state.requests.filter((r) => r.status === 'new').length} to route</span>}
+        {state.clarifications.length > 0 && <span className="cyan">? {state.clarifications.length} question{state.clarifications.length > 1 ? 's' : ''} for you</span>}
         {state.escalations.length > 0 && <span className="amber">! {state.escalations.length} need{state.escalations.length === 1 ? 's' : ''} you</span>}
         {state.approvals.some((a) => a.status === 'pending') && <span className="cyan">◆ {state.approvals.filter((a) => a.status === 'pending').length} awaiting approval</span>}
         <span className="sp" />
@@ -149,6 +150,7 @@ export function App() {
           )}
           {tab === 'board' && <Board goal={goal} beads={goalBeads} selected={bead?.id} onSelect={select} tag={identityTag}
             onTogglePause={goal ? () => { void api(`/api/goals/${goal.id}/${goal.paused ? 'resume' : 'pause'}`, {}).then(() => refresh()).catch((e: Error) => setError(e.message)); } : undefined} />}
+          {tab === 'inbox' && <Clarifications items={state.clarifications} goals={state.goals} onDone={() => void refresh()} setError={setError} />}
           {tab === 'inbox' && <Escalations escalations={state.escalations} goals={state.goals} onDone={() => void refresh()} setError={setError} />}
           {tab === 'inbox' && <RequestList requests={state.requests} projects={state.projects} planning={state.planning} onDone={() => void refresh()} setError={setError} />}
           {tab === 'inbox' && <Inbox approvals={state.approvals} goals={state.goals} order={idOrder} onDone={() => void refresh()} setError={setError} />}
