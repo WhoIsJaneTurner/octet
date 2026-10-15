@@ -15,6 +15,12 @@ export interface State {
   seats: Seat[]; identities: Identity[]; projects: Project[]; goals: Goal[]; requests: Request[]; plans: PlanRecord[]; clarifications: Clarification[]; escalations: Escalation[]; planning: string[]; planAudit: { ok: boolean; checked: number; problems: { plan: string; problem: string }[] }; beads: Bead[];
   events: OctetEvent[]; running: string[];
   reviewing: string[]; review: { auto: boolean; autoMerge: boolean; maxRounds: number }; approvals: Approval[]; prs: PullRequest[]; limits: { maxEngineers: number; maxActiveGoals: number }; audit: ChainCheck;
+  intake?: IntakeStatus;
+}
+
+export interface IntakeStatus {
+  sources: { kind: string; enabled: boolean; detail: string; lastPollAt: string | null; lastError: string | null }[];
+  held: string[];
 }
 
 export interface Request {

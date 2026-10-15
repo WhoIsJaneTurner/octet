@@ -3,6 +3,7 @@ import { api, useOctet } from './api';
 import { Detail } from './Detail';
 import { Clarifications, Escalations, Inbox } from './Approvals';
 import { NewRequest, RequestList } from './Requests';
+import { IntakeLine } from './IntakeLine';
 import { Board, Council, Log, PrCard } from './views';
 import { IdentityTag } from './ui';
 
@@ -150,6 +151,7 @@ export function App() {
           )}
           {tab === 'board' && <Board goal={goal} beads={goalBeads} selected={bead?.id} onSelect={select} tag={identityTag}
             onTogglePause={goal ? () => { void api(`/api/goals/${goal.id}/${goal.paused ? 'resume' : 'pause'}`, {}).then(() => refresh()).catch((e: Error) => setError(e.message)); } : undefined} />}
+          {tab === 'inbox' && <IntakeLine intake={state.intake} requests={state.requests} />}
           {tab === 'inbox' && <Clarifications items={state.clarifications} goals={state.goals} onDone={() => void refresh()} setError={setError} />}
           {tab === 'inbox' && <Escalations escalations={state.escalations} goals={state.goals} onDone={() => void refresh()} setError={setError} />}
           {tab === 'inbox' && <RequestList requests={state.requests} projects={state.projects} planning={state.planning} onDone={() => void refresh()} setError={setError} />}

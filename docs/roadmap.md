@@ -62,10 +62,10 @@ Each step is shippable on its own and leaves the product working.
 | 5 | ~~Marshal decomposition + validation (P2)~~ **Done** (model refinement flag not built) | planning §6 | M | Plan becomes beads |
 | 6 | ~~Scheduler loop (P3)~~ **Done**, with autonomy levels | planning §7 | L | The "describe it, approve the plan, come back to a PR" experience |
 | 7 | ~~Merge-conflict handling and stale-base rebasing~~ **Done** | hardening §4 | M | Needed the moment two beads touch the same file |
-| 8 | GitHub issue intake | intake §3 | M | First external source; read-only |
+| 8 | ~~GitHub issue intake~~ **Done** (tested against fakes only) | intake §3 | M | First external source; read-only |
 | 9 | ~~Scout + Chair (P4)~~ **Done** (parallel Scouts and the free-text chat panel are not built) | planning §6 | M | Better plans, fewer wrong guesses |
 | 10 | ~~Autonomy levels + planning evals (P5)~~ **Done** (autonomy shipped with the scheduler in step 6; evals in `packages/core/test/evals/`) | planning §8 | M | Makes quality measurable before trusting more autonomy |
-| 11 | Jira and chat intake | intake §4, §5 | M each | Need credentials from you |
+| 11 | ~~Jira and chat intake~~ **Done** (Jira and Slack against fakes and local servers only; no write-back) | intake §4, §5 | M each | Need credentials from you |
 | 12 | Builder sandboxing | hardening §1 | L | Required before running on code you do not trust |
 | 13 | Second agent adapter (ACP), MCP policy, OpenTelemetry | hardening §2 | L | Interoperability and observability |
 | 14 | Desktop shell, packaging, CI | hardening §6 | M | Polish |

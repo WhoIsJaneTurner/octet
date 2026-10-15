@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import {
   addBead, addProject, answerClarification, approveBead, cancelBead, ClaudeCodeRunner, createGoal, dbFile, decideApproval, editPlan, FakeRunner, getIdentity,
-  ghToken, loadIdentities, loadLimits, loadProjects, ClarificationNeeded, loadGithubHosts, loadPlanning, loadReview, setGithubHosts, OctetError, openVault, planRequest, rejectPlan, rejectRequest, renderPlan, updateProject, verifyPlans, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
+  ghToken, IntakeService, loadIdentities, loadIntake, loadJiraCredentials, loadSlackCredentials, loadLimits, loadProjects, ClarificationNeeded, loadGithubHosts, loadPlanning, loadReview, setGithubHosts, OctetError, openVault, planRequest, rejectPlan, rejectRequest, renderPlan, updateProject, verifyPlans, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
 } from '@octet/core';
 
 const USAGE = `octet <command>
@@ -26,6 +26,8 @@ const USAGE = `octet <command>
   plan edit <id> --file <json>      replace the plan with your edit (saved as a new version)
   goal pause|resume <goal>          stop or restart the scheduler for a goal
   escalation list|resolve <id>      things the scheduler needs you for
+  intake status                     which external sources are on, their credentials, recent intake events
+  intake poll                       poll GitHub and Jira once now (Slack is push-only and runs in the daemon)
   goal new <project> <title>
   goal list
   bead add <goal> <title> --brief <text> [--after <bead>]...
@@ -232,6 +234,27 @@ async function main(argv: string[]): Promise<void> {
     if (cmd === 'resolve' && rest[0]) {
       if (!store.resolveEscalation(rest[0])) throw new OctetError(`No open escalation "${rest[0]}"`);
       return void console.log(`resolved ${rest[0]}`);
+    }
+  }
+
+  if (group === 'intake') {
+    const cfg = loadIntake();
+    if (cmd === 'status') {
+      const ctx = makeCtx(true);
+      const check = (f: () => unknown): string => { try { f(); return 'credentials ok'; } catch (e) { return (e as Error).message; } };
+      const line = (name: string, on: boolean, detail: string) => console.log(`${name.padEnd(7)} ${on ? 'ON ' : 'off'}  ${detail}`);
+      line('github', cfg.github.enabled, `label "${cfg.github.label}", every ${cfg.github.pollSeconds}s, allowed authors: ${cfg.github.allowedAuthors.join(', ') || '(none)'}`);
+      line('jira', cfg.jira.enabled, cfg.jira.filters.map((f) => `${f.project}: ${ctx.projects.some((p) => p.name === f.project) ? check(() => loadJiraCredentials(ctx.projects.find((p) => p.name === f.project)!.identity)) : 'unknown project'}`).join('; ') || 'no filters configured');
+      line('chat', cfg.chat.enabled, `${cfg.chat.command}, ${cfg.chat.allowedUsers.length} allowed user(s)${cfg.chat.enabled ? `, ${check(() => loadSlackCredentials())}` : ''}`);
+      for (const e of ctx.store.events(200).filter((x) => x.kind.startsWith('intake.')).slice(0, 5)) console.log(`${e.ts}  ${e.kind}  ${JSON.stringify(e.data)}`);
+      return;
+    }
+    if (cmd === 'poll') {
+      const results = await new IntakeService(makeCtx(true), cfg).pollOnce();
+      if (!results.length) return void console.log('No pollable source is enabled. Set enabled = true under [intake.github] or [intake.jira] in config.toml.');
+      for (const r of results) console.log(`${r.adapter.padEnd(20)} ${r.ok ? `new ${r.created}, seen ${r.duplicates}, updated ${r.updated}, held ${r.held}` : `FAILED: ${r.error}`}`);
+      process.exitCode = results.every((r) => r.ok) ? 0 : 1;
+      return;
     }
   }
 

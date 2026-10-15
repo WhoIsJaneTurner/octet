@@ -538,6 +538,14 @@ export class Store {
     this.changed();
   }
 
+  /** An edited external issue or ticket refreshes its request, but only while you have not acted on it. True if applied. */
+  updateRequestText(id: string, text: { title: string; body: string }): boolean {
+    const res = this.db.prepare("UPDATE requests SET title = ?, body = ? WHERE id = ? AND status = 'new'").run(text.title, text.body, id);
+    if (Number(res.changes) === 0) return false;
+    this.changed();
+    return true;
+  }
+
   /** Registers a run owned by this process. Returns it with its run number. */
   startRun(beadId: string, pid: number, host: string): BeadRun {
     const n = Number((this.db.prepare('SELECT COUNT(*) AS n FROM bead_runs WHERE bead_id = ?').get(beadId) as Row).n) + 1;
