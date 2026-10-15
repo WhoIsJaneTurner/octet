@@ -83,9 +83,18 @@ test('chat: users who are not allow-listed are dropped and logged, with no reque
   assert.equal(ctx.store.listRequests().length, 0);
   assert.equal(transport.posts.length, 0);
   const dropped = ctx.store.eventsOfKind('intake.dropped');
-  assert.equal(dropped.length, 3);
+  // The same outsider is logged once per window (not once per message); the unknown sender is a different key.
+  assert.equal(dropped.length, 2);
   assert.equal((dropped[0]!.data as { user: string }).user, 'U_STRANGER');
   assert.ok(!JSON.stringify(dropped).includes('delete everything')); // the text is not logged
+});
+
+test('chat: an outsider spamming cannot flood the audit log', async () => {
+  const { ctx, transport, send } = setup();
+  for (let i = 0; i < 50; i++) await send(mention(`spam ${i}`, { user: 'U_SPAMMER' }, `env-${i}`));
+  assert.equal(ctx.store.eventsOfKind('intake.dropped').length, 1);
+  assert.equal(ctx.store.listRequests().length, 0);
+  assert.equal(transport.posts.length, 0);
 });
 
 test('chat: a Slack retry or a replayed envelope never makes a second request or a second reply', async () => {
