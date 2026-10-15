@@ -25,3 +25,6 @@ export * from './intake-github.ts';
 export * from './intake-jira.ts';
 export * from './intake-chat.ts';
 export * from './intake-runtime.ts';
+export * from './configcheck.ts';
+export * from './lock.ts';
+export * from './doctor.ts';

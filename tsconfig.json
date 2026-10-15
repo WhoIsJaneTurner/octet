@@ -12,5 +12,5 @@
     "noUncheckedIndexedAccess": true,
     "types": ["node"]
   },
-  "include": ["packages/core/src", "packages/core/test", "packages/cli/src", "packages/daemon/src", "packages/daemon/test"]
+  "include": ["packages/core/src", "packages/core/test", "packages/cli/src", "packages/cli/test", "scripts", "packages/daemon/src", "packages/daemon/test"]
 }

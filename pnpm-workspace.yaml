@@ -1,5 +1,7 @@
 packages:
   - "packages/*"
+  # Electron is too large to install by default; the desktop shell is installed on its own (see its README).
+  - "!packages/desktop"
 # esbuild ships its binary via a platform package; its install script is not needed.
 allowBuilds:
   esbuild: false

@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { parse, stringify } from 'smol-toml';
+import { stringify } from 'smol-toml';
+import { readConfigFile } from './configcheck.ts';
 import { OctetError } from './errors.ts';
 import { expandHome, getIdentity, type Identity } from './identity.ts';
 import { projectsFile } from './paths.ts';
@@ -27,7 +28,7 @@ export interface Project {
 
 export function loadProjects(file: string = projectsFile()): Project[] {
   if (!existsSync(file)) return [];
-  const doc = parse(readFileSync(file, 'utf8')) as {
+  const doc = readConfigFile('projects', file) as {
     projects?: Record<string, {
       path?: string; identity?: string; vault?: string; vault_git?: boolean; vault_in_repo?: boolean; autonomy?: string; default_branch?: string;
     }>;

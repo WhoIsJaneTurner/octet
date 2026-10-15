@@ -14,3 +14,5 @@ pnpm octet bead run <bead>
 
 Requires Node 24+. Git identity is per project and never defaults; the Warden refuses pushes to a remote the project's account doesn't own.
 Run `pnpm test` and `pnpm typecheck`.
+
+Also: `pnpm octet doctor` checks your setup, `pnpm octet install` puts `octet` in `~/.local/bin`, and `pnpm octet completion zsh|bash` prints shell completion. `pnpm check` runs the source hygiene check. `OCTET_BROWSER=1 pnpm test` adds a headless-Chrome smoke test of the UI (needs Chrome and `pnpm ui:build`). The Electron shell in `packages/desktop` is an unbuilt scaffold.

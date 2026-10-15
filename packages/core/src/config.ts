@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { parse } from 'smol-toml';
+import { readConfigFile } from './configcheck.ts';
 import { octetHome } from './paths.ts';
 
 export interface Limits {
@@ -32,7 +32,7 @@ const positive = (v: unknown, fallback: number): number =>
 
 export function loadReview(file: string = join(octetHome(), 'config.toml')): ReviewConfig {
   if (!existsSync(file)) return { ...DEFAULT_REVIEW };
-  const r = (parse(readFileSync(file, 'utf8')) as { review?: Record<string, unknown> }).review ?? {};
+  const r = (readConfigFile('config', file) as { review?: Record<string, unknown> }).review ?? {};
   return {
     auto: r.auto === true,
     autoMerge: r.auto_merge === true,
@@ -44,7 +44,7 @@ export function loadReview(file: string = join(octetHome(), 'config.toml')): Rev
 /** Reads `[limits]` from ~/.config/octet/config.toml. Missing file or keys use defaults. */
 export function loadLimits(file: string = join(octetHome(), 'config.toml')): Limits {
   if (!existsSync(file)) return { ...DEFAULT_LIMITS };
-  const doc = parse(readFileSync(file, 'utf8')) as { limits?: Record<string, unknown> };
+  const doc = readConfigFile('config', file) as { limits?: Record<string, unknown> };
   return {
     maxEngineers: positive(doc.limits?.max_engineers, DEFAULT_LIMITS.maxEngineers),
     maxActiveGoals: positive(doc.limits?.max_active_goals, DEFAULT_LIMITS.maxActiveGoals),
@@ -72,7 +72,7 @@ export const DEFAULT_PLANNING: PlanningConfig = { maxBeads: 12, maxPoints: 36, m
 /** Reads `[planning]` from config.toml. Missing file or keys use defaults. */
 export function loadPlanning(file: string = join(octetHome(), 'config.toml')): PlanningConfig {
   if (!existsSync(file)) return { ...DEFAULT_PLANNING };
-  const t = (parse(readFileSync(file, 'utf8')) as { planning?: Record<string, unknown> }).planning ?? {};
+  const t = (readConfigFile('config', file) as { planning?: Record<string, unknown> }).planning ?? {};
   return {
     maxBeads: positive(t.max_beads, DEFAULT_PLANNING.maxBeads),
     maxPoints: positive(t.max_points, DEFAULT_PLANNING.maxPoints),
@@ -86,6 +86,6 @@ export function loadPlanning(file: string = join(octetHome(), 'config.toml')): P
 /** Reads `[github] hosts` (GitHub Enterprise hostnames) from config.toml. */
 export function loadGithubHosts(file: string = join(octetHome(), 'config.toml')): string[] {
   if (!existsSync(file)) return [];
-  const g = (parse(readFileSync(file, 'utf8')) as { github?: { hosts?: unknown } }).github;
+  const g = (readConfigFile('config', file) as { github?: { hosts?: unknown } }).github;
   return Array.isArray(g?.hosts) ? g.hosts.filter((h): h is string => typeof h === 'string') : [];
 }
