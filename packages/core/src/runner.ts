@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Env } from './git.ts';
+import { prepareSandbox, watchMemory, type SandboxConfig, type SandboxRequest } from './sandbox.ts';
 import type { SeatId } from './seats.ts';
 
 export interface RunRequest {
@@ -17,6 +18,8 @@ export interface RunRequest {
   signal?: AbortSignal;
   /** Kill the agent if it is still running after this long. */
   timeoutMs?: number;
+  /** Wraps the agent in the builder sandbox (see sandbox.ts). Absent = config.toml decides, with no event sink. */
+  sandbox?: SandboxRequest;
 }
 
 export interface RunResult {
@@ -27,6 +30,8 @@ export interface RunResult {
   cancelled?: boolean;
   /** Stopped because `timeoutMs` elapsed. */
   timedOut?: boolean;
+  /** Stopped because the agent's processes passed the sandbox memory ceiling. */
+  memoryExceeded?: boolean;
 }
 
 export interface AgentRunner {
@@ -39,7 +44,9 @@ export const DENIED_TOOLS = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:
 const KILL_GRACE_MS = 5000;
 
 export class ClaudeCodeRunner implements AgentRunner {
-  run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
+  /** Sandbox settings for every run; unset reads `[sandbox]` from config.toml. A request's own `sandbox.config` wins. */
+  sandbox?: SandboxConfig;
+  async run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
     const args = [
       '-p',
       '--append-system-prompt', req.systemPrompt,
@@ -51,13 +58,16 @@ export class ClaudeCodeRunner implements AgentRunner {
         : ['--permission-mode', 'acceptEdits', '--disallowedTools', DENIED_TOOLS.join(',')]),
     ];
     if (req.model) args.push('--model', req.model);
+    // Throws in `required` mode when the sandbox cannot be applied: an agent never runs unprotected by accident.
+    const sb = await prepareSandbox(req, 'claude', args, this.sandbox);
     const started = Date.now();
     return new Promise((resolve, reject) => {
       // Own process group, so a kill reaches everything the agent started, not just `claude`.
-      const child = spawn('claude', args, { cwd: req.cwd, env: req.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+      const child = spawn(sb?.command ?? 'claude', sb?.args ?? args, { cwd: req.cwd, env: sb?.env ?? req.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
       let output = '';
       let cancelled = false;
       let timedOut = false;
+      let memoryExceeded = false;
       let killTimer: NodeJS.Timeout | undefined;
       const killGroup = (sig: NodeJS.Signals) => {
         try { process.kill(-child.pid!, sig); } catch { /* already gone */ }
@@ -70,7 +80,13 @@ export class ClaudeCodeRunner implements AgentRunner {
       if (req.signal?.aborted) onAbort();
       else req.signal?.addEventListener('abort', onAbort, { once: true });
       const timer = req.timeoutMs ? setTimeout(() => { timedOut = true; stop(); }, req.timeoutMs) : undefined;
+      const stopMemory = sb && child.pid ? watchMemory(child.pid, sb.memoryMb, (mb) => {
+        memoryExceeded = true;
+        req.sandbox?.onEvent?.('sandbox.memory_exceeded', { seat: req.seat, usedMb: Math.round(mb), limitMb: sb.memoryMb });
+        stop();
+      }) : undefined;
       const cleanup = () => {
+        stopMemory?.();
         clearTimeout(timer);
         clearTimeout(killTimer);
         req.signal?.removeEventListener('abort', onAbort);
@@ -82,12 +98,14 @@ export class ClaudeCodeRunner implements AgentRunner {
       };
       child.stdout.on('data', take);
       child.stderr.on('data', take);
-      child.on('error', (e) => { cleanup(); reject(e); });
-      child.on('close', (code) => {
+      child.on('error', (e) => { cleanup(); void sb?.dispose(); reject(e); });
+      child.on('close', async (code) => {
         cleanup();
         // Anything left in the group after the leader exits is cleaned up too.
         killGroup('SIGKILL');
-        resolve({ exitCode: code ?? 1, output, durationMs: Date.now() - started, ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}) });
+        const durationMs = Date.now() - started;
+        await sb?.finish().catch(() => {});
+        resolve({ exitCode: code ?? 1, output, durationMs, ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}), ...(memoryExceeded ? { memoryExceeded } : {}) });
       });
       child.stdin.end(req.prompt);
     });

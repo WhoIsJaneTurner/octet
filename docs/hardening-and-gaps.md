@@ -19,6 +19,68 @@ Everything not on the planning side that still needs doing, plus bugs and rough 
 
 **Tests.** A fixture "hostile engineer" runner that tries to read `~/.ssh`, write outside the worktree and call out to the network. Each attempt must fail and be logged.
 
+### As built
+
+**Decision: a Seatbelt profile around the whole `claude` process, not Claude Code's built-in sandbox.** Researched against the current docs and `claude --help` (v2.1.296):
+
+| Option | Verdict |
+|---|---|
+| Claude Code's built-in sandbox (`--settings` with `sandbox.*`) | Rejected as the boundary. It wraps shell commands only. Its Read, Edit, Write and WebFetch tools, MCP servers and hooks run outside it, `denyRead` does not stop the Read tool, and reads are open by default (`~/.ssh` is readable until you list it). Useful as a second layer later, not as the wall |
+| `sandbox-exec` (Seatbelt) profile around the spawn | **Chosen.** Covers the model process, its file tools and every child. Default deny, so the policy is an allow-list. Deprecated by Apple in the man page but still what Claude Code itself uses on macOS |
+| Container per run | Not built. Stronger, but needs Docker/Colima running and a way to reach the macOS keychain login |
+
+Code: `packages/core/src/sandbox.ts` (profile, environment scrub, memory watchdog, denial collection, config), `packages/core/src/netproxy.ts` (host allow-list proxy). `ClaudeCodeRunner` calls `prepareSandbox()` for every run; `runBead`, `reviewBead`, `requestPrecomment` and `reviewExternalPr` pass `sandboxFor(ctx, ...)` on the `RunRequest` so events land in the audit log. A runner option (`runner.sandbox = cfg`), `Ctx.sandbox` or `RunRequest.sandbox.config` override `config.toml`. Any new seat that spawns an agent (the planning side) must pass `...sandboxFor(ctx, { goalId, seat })` on its `RunRequest`; without it the run still sandboxes, but its events are not logged.
+
+**Config** (`~/.config/octet/config.toml`):
+
+```toml
+[sandbox]
+mode = "auto"            # off | auto | required
+allow_hosts = ["registry.npmjs.org", "*.pypi.org"]   # on top of the model API hosts
+extra_read_paths = ["~/.cargo", "~/.rustup"]          # toolchains outside the usual places
+extra_write_paths = ["~/.cache/pnpm"]                 # build caches; use sparingly
+memory_mb = 4096         # 0 = no ceiling
+```
+
+- `required`: if `sandbox-exec` is missing or cannot be applied (for example Octet itself runs inside another sandbox), the run throws `Sandbox is required ... Refusing to run the agent unprotected` and the bead fails. It never falls back.
+- `auto`: sandbox when possible. Otherwise run unprotected and log a `sandbox.unavailable` event whose message says so.
+- `off`: no sandbox, no events. An unknown mode is a config error, never `off`.
+- **Default is `auto`.** I chose it because a real `claude`, logged in on this machine, ran under the profile end to end (see "Evidence"). On a machine without `sandbox-exec` (Linux, Windows) `auto` means *unprotected*; set `required` there once a Linux backend exists, or if you want a hard guarantee on macOS.
+
+**What the profile allows** (everything else is denied):
+
+| Control | Policy |
+|---|---|
+| Reads | System paths (`/usr`, `/bin`, `/sbin`, `/System`, `/Library`, `/opt/homebrew`, `/private/etc`, a few `/private/var/db` entries), every `PATH` directory outside the home directory, the prefix of the node running Octet, the package `claude` is installed in, the worktree, the repository's git directory, the macOS keychain files, `~/.claude`, plus `extra_read_paths`. The existence and size of any path is visible (`file-read-metadata`); contents are not |
+| Writes | The worktree (not for read-only seats), a fresh scratch directory per run (`TMPDIR` and `CLAUDE_CODE_TMPDIR` point at it; deleted afterwards), `~/.claude` and `~/.claude.json`, plus `extra_write_paths`. In a linked worktree, git gets `objects/`, the worktree's private git dir and its own branch ref and reflog, so `git add` and `git commit` work. `hooks/`, `config`, `HEAD`, `commondir`, the `.git` pointer file and every other branch stay read-only: an agent cannot plant a hook that Octet's own `git commit` would later run, or move the worktree to another branch |
+| Never, whatever else says so | `OCTET_HOME`, `OCTET_DATA` (database and audit log), `~/.config/octet`, `~/.local/share/octet`, `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/gh`, `~/.npmrc`, `~/.netrc`. Other worktrees, the repository root and other repositories are simply not in the allow-list. `~/.claude/projects`, `history.jsonl`, `file-history`, `sessions` and friends are **write-only**: the agent can add its own transcript but cannot read other sessions' |
+| Network | Outbound connections are denied except to one loopback port: an allow-list CONNECT proxy that Octet starts per run. `HTTPS_PROXY` and friends point at it. It allows `api.anthropic.com`, `platform.claude.com`, `console.anthropic.com` and `allow_hosts` (exact names or `*.suffix`), refuses plain HTTP, and refuses hosts that resolve to loopback, private or link-local addresses. Direct connections, including to `127.0.0.1` services such as the Octet daemon, are denied by the kernel. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` is set so telemetry and update checks do not need more hosts |
+| Credentials | The agent gets the caller's environment minus anything named like a credential (`*TOKEN*`, `*SECRET*`, `*PASSW*`, `*API_KEY*`, `*_KEY`, `*SESSION*`, `AUTH*` but not `GIT_AUTHOR_*`), `AWS_*`, `OCTET_*` (except `OCTET_IDENTITY`), `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` (it names a private key path) and `GNUPGHOME`. Kept on purpose: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`, because the agent cannot call the model without its own credential. A test dumps the sandboxed environment and checks all of this |
+| Processes | The existing timeout and process-group kill, plus a memory ceiling (`memory_mb`, default 4096). macOS cannot enforce a per-process memory rlimit, so this is a watchdog: every 2 seconds it sums resident memory of the process group and kills the group when over, reporting `memoryExceeded` and a `sandbox.memory_exceeded` event |
+
+**Audit.** Each run logs `sandbox.started` (hosts, ceiling, scratch dir). The proxy logs `sandbox.network_denied` per refused host. After the run, the kernel's denials are read back from the unified log (the profile stamps every denial with a per-run tag) and logged as one `sandbox.denied` event with the operation, target, process and count of each refusal, so a read of `~/.ssh/...` or a write outside the worktree shows up with its path. This is best effort: it waits about 1.5 seconds for the log to settle and records nothing if `/usr/bin/log` is unavailable. The benign background denials every macOS process produces (`/dev/dtracehelper`, a few Mach lookups) appear too; the list is capped at 100 entries.
+
+**Evidence.**
+
+- `packages/core/test/sandbox.test.ts` (skips cleanly where `sandbox-exec` is absent). The hostile engineer is a stand-in `claude` on `PATH`, run through the real runner and profile with a fake `HOME` holding canary files. Denied and checked: read of a `~/.ssh` canary, the Octet config and database canaries, another session's transcript, another worktree, another repo, the repository root; listing `~/.ssh` and another worktree; writes outside the worktree, into another worktree, into `HOME`, onto the SSH canary, into `.git/hooks`, `.git/config`, another branch's ref, the worktree's `HEAD`, and the `.git` pointer file; `git checkout` of another branch; a connection to a local HTTP server on `127.0.0.1` (directly and through the proxy; the server records zero hits); a connection to a non-allowed host (`evil.example.com`) and to a raw external IP. Controls that must still work: write in the worktree and in scratch, `git add`, `git commit`. Afterwards every canary is byte-identical with an unchanged mtime and nothing was created outside the worktree. The audit events are asserted, including the canary paths in `sandbox.denied` and `evil.example.com` in `sandbox.network_denied`.
+- Also tested: environment contents, read-only seat, memory ceiling kill, `required` refusing to run (agent never executes), `auto` fallback event, config parsing, proxy tunnelling and SSRF refusal, `runBead` end to end with events in a verifying audit chain.
+- **Live, real `claude` (v2.1.296), logged in on this machine.** `OCTET_LIVE=1 node --test packages/core/test/sandbox.test.ts` runs one prompt ("create hello.txt containing ok") under `mode = "required"`; it passed (about 10 s). During development the same profile was run on tiny prompts as engineer and as read-only reviewer (the Read tool read a file in the worktree).
+- What the real login needed, found by removing each grant and watching for `Not logged in`: Claude Code keeps its OAuth login in the macOS keychain, so the profile must allow reading `~/Library/Keychains` (read-only is enough) and the Mach service `com.apple.SecurityServer`. It also writes a per-user temp directory (`/tmp/claude-<uid>`) unless `CLAUDE_CODE_TMPDIR` points elsewhere, which Octet sets to the scratch directory so the agent never sees other sessions' temp files.
+
+**Limits: what this does not stop.**
+
+1. **The agent's own model login.** With the keychain reachable, a sandboxed agent can ask the Security server for the `Claude Code-credentials` item (for example `security find-generic-password -w`) and may be able to read its OAuth token. The token is the agent's own and only works against the model API, but it is a credential. Removing this means `claude setup-token` and passing `CLAUDE_CODE_OAUTH_TOKEN` in the environment, then dropping the keychain grants; not done because it changes how you log in.
+2. **Data the agent is allowed to read can leave through the allowed hosts.** The model API is reachable by design, and `allow_hosts` entries (an npm registry, say) accept uploads. A hostile agent can send the worktree's contents to them. The sandbox limits *which* secrets it can find, not what it does with what it can.
+3. **The repository's git directory is readable**, so an agent can read every branch's history in that repository, and `<repo>/.git/config` (remote URLs, sometimes tokens embedded in them). Other repositories are not readable.
+4. **Reads of `~/.claude` other than transcripts are open** (settings, plugins, skills). This matters: `~/.claude/settings.json` can hold secrets in its `env` block. On this machine it carries a bearer header for an OTLP telemetry endpoint, which a sandboxed agent can read (the proxy does refuse that host, and logged the attempt as `sandbox.network_denied` in the live run). Keep secrets out of `settings.json`, or start builders with `--setting-sources project,local` once you are happy to lose your user-level settings for them. Transcripts of other sessions are write-only; anything the agent writes there it cannot read back either, and Claude Code coped in every run tried.
+5. **Metadata is visible.** The agent can learn that paths exist (`~/.ssh/id_ed25519` and its size) without reading them.
+6. **Kernel and Seatbelt itself.** Sandbox escapes through a kernel bug, or through the Mach services allowed (`opendirectoryd`, `SecurityServer`, `cfprefsd`, `trustd`, `logd`, a few others), are out of scope. `sandbox-exec` is deprecated by Apple.
+7. **Local services are unreachable, which can break work**: a test that starts a dev server and calls it over loopback fails, as do tools that need DNS directly (no resolver is allowed; DNS is done by the proxy). Package installs work only for hosts in `allow_hosts` and only for tools that honour `HTTPS_PROXY`.
+8. **Toolchains under the home directory** (cargo, pyenv, a pnpm store) are unreadable until listed in `extra_read_paths`/`extra_write_paths`. The first run of a new language will probably need that.
+9. **The memory watchdog is a poll**, 2 seconds apart, so a fast allocation can overshoot before it fires. Processes that leave the process group (`setsid`) escape it, though not the filesystem or network rules. There is no CPU or disk ceiling.
+10. **Not covered at all**: the Octet daemon and CLI themselves, the Courier and Warden (they run outside the sandbox with real tokens by design), MCP servers (disabled for builders), Linux and Windows (`auto` runs unprotected there, with an event).
+11. **Profile fragility.** Seatbelt filters match real paths and need an explicit list of what each tool touches. A new Claude Code release that reads a new path will fail loudly (denials are logged); widen `extra_read_paths` or fix the profile rather than turning the sandbox off.
+
 ## 2. Interoperability and observability (L)
 
 ### 2.1 Second agent adapter, via ACP
@@ -153,7 +215,7 @@ From [orchestrator-reference.md](orchestrator-reference.md) §12, after the firs
 |---|---|
 | OpenTelemetry traces | Not started (§2.3) |
 | MCP / ACP / A2A | Not started (§2.1, §2.2). A2A is only relevant if Octet ever talks to other orchestrators |
-| Builder sandboxing | Not started (§1) |
+| Builder sandboxing | Built for macOS (§1, "As built"); Linux backend and the listed limits remain |
 | Effort scaling | Designed (planning §5), not built |
 | Audit head anchoring | Designed (vault §5), not built |
 | Chair, Marshal, Architect, Scout | Designed (planning), not built |

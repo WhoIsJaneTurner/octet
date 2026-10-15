@@ -12,6 +12,7 @@ import { checkRemote, childEnv, getIdentity, type Identity } from './identity.ts
 import { loadPersona } from './personas.ts';
 import { getProject, type Project } from './project.ts';
 import type { AgentRunner } from './runner.ts';
+import { sandboxFor, type SandboxConfig } from './sandbox.ts';
 import { newId, type Approval, type Bead, type Goal, type PullRequest, type Store } from './store.ts';
 import { evaluate } from './warden.ts';
 
@@ -27,6 +28,8 @@ export interface Ctx {
   runsDir?: string;
   /** How often a running engineer proves it is alive and checks for a cancel request. */
   heartbeatMs?: number;
+  /** Builder sandbox settings; unset reads `[sandbox]` from config.toml when the runner starts an agent. */
+  sandbox?: SandboxConfig;
 }
 
 const HEARTBEAT_MS = 5000;
@@ -197,6 +200,7 @@ export async function runBead(
       {
         seat: 'engineer', cwd: bead.worktree, prompt: assignment(goal, bead, feedback, projectInstructions(bead.worktree)),
         systemPrompt: loadPersona('engineer'), env, signal: abort.signal, timeoutMs: limitsOf(ctx).runTimeoutMs,
+        ...sandboxFor(ctx, { goalId: goal.id, beadId: bead.id, seat: 'engineer' }),
       },
       record,
     );
@@ -449,7 +453,7 @@ export async function reviewBead(ctx: Ctx, beadId: string): Promise<{ verdict: V
 
   ctx.store.log({ kind: 'review.started', goalId: goal.id, beadId, seat: 'reviewer' });
   const result = await ctx.runner.run(
-    { seat: 'reviewer', cwd: bead.worktree, prompt, systemPrompt: loadPersona('reviewer'), env: childEnv(identity), readOnly: true },
+    { seat: 'reviewer', cwd: bead.worktree, prompt, systemPrompt: loadPersona('reviewer'), env: childEnv(identity), readOnly: true, ...sandboxFor(ctx, { goalId: goal.id, beadId, seat: 'reviewer' }) },
   );
   const parsed = result.exitCode === 0 ? parseVerdict(result.output) : { verdict: 'inconclusive' as const, feedback: result.output.slice(-2000) };
   ctx.store.log({ kind: 'review.verdict', goalId: goal.id, beadId, seat: 'reviewer', data: { verdict: parsed.verdict, feedback: parsed.feedback.slice(0, 4000) } });
@@ -562,7 +566,7 @@ export async function requestPrecomment(ctx: Ctx, goalId: string): Promise<Appro
     '', 'Write a review a teammate can use: what changed, risks, missed cases, and anything to test. End with your VERDICT line.',
   ].join('\n');
   ctx.store.log({ kind: 'review.started', goalId, seat: 'reviewer', data: { scope: 'pull request' } });
-  const result = await ctx.runner.run({ seat: 'reviewer', cwd: goal.worktree, prompt, systemPrompt: loadPersona('reviewer'), env, readOnly: true });
+  const result = await ctx.runner.run({ seat: 'reviewer', cwd: goal.worktree, prompt, systemPrompt: loadPersona('reviewer'), env, readOnly: true, ...sandboxFor(ctx, { goalId, seat: 'reviewer' }) });
   if (result.exitCode !== 0) throw new OctetError(`Reviewer failed: ${result.output.slice(-500)}`);
   const parsed = parseVerdict(result.output);
   ctx.store.log({ kind: 'review.verdict', goalId, seat: 'reviewer', data: { verdict: parsed.verdict, scope: 'pull request' } });
@@ -595,7 +599,7 @@ export async function reviewExternalPr(
   ].join('\n');
   const cwd = mkdtempSync(join(tmpdir(), 'octet-pr-review-'));
   ctx.store.log({ kind: 'review.external.started', seat: 'reviewer', data: { url: input.url, identity: identity.id } });
-  const result = await ctx.runner.run({ seat: 'reviewer', cwd, prompt, systemPrompt: loadPersona('reviewer'), env: childEnv(identity), readOnly: true });
+  const result = await ctx.runner.run({ seat: 'reviewer', cwd, prompt, systemPrompt: loadPersona('reviewer'), env: childEnv(identity), readOnly: true, ...sandboxFor(ctx, { seat: 'reviewer' }) });
   const parsed = result.exitCode === 0 ? parseVerdict(result.output) : { verdict: 'inconclusive' as const, feedback: result.output.slice(-2000) };
   ctx.store.log({ kind: 'review.external.verdict', seat: 'reviewer', data: { url: input.url, verdict: parsed.verdict } });
   return parsed;

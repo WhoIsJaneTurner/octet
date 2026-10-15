@@ -252,7 +252,7 @@ What Octet already satisfies and what it does not yet. This is the honest status
 | AGENTS.md | Implemented: the repo's AGENTS.md is passed to builders as data, capped at 8,000 characters |
 | OpenTelemetry traces | **Not implemented** |
 | MCP / ACP / A2A | **Not implemented**; one adapter only. Builders run with MCP disabled |
-| Builder sandboxing beyond a denied-tools list | **Not implemented** (agents run with `acceptEdits`) |
+| Builder sandboxing beyond a denied-tools list | Implemented on macOS: a Seatbelt profile around the whole agent process, host allow-list proxy, memory ceiling, denials in the audit log; see [hardening-and-gaps.md](hardening-and-gaps.md) §1 for the limits |
 | Architect, Scout, Reviewer, Marshal, Chair agents | Persona prompts exist; **no runtime**. The Courier is deterministic code, not a model |
 
 Suggested order: store the audit head hash outside the database, a real end-to-end delivery test against a private repo, a Reviewer runtime, a second adapter via ACP, then OpenTelemetry and sandboxing.

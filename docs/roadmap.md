@@ -61,7 +61,7 @@ Each step is shippable on its own and leaves the product working.
 | 9 | Scout + Chair conversational intake (P4) | planning §6 | M | Better plans, fewer wrong guesses |
 | 10 | Autonomy levels + planning evals (P5) | planning §8 | M | Makes quality measurable before trusting more autonomy |
 | 11 | Jira and chat intake | intake §4, §5 | M each | Need credentials from you |
-| 12 | Builder sandboxing | hardening §1 | L | Required before running on code you do not trust |
+| 12 | ~~Builder sandboxing~~ **Done** (macOS Seatbelt around the whole agent, default `auto`; limits listed in hardening §1) | hardening §1 | L | Required before running on code you do not trust |
 | 13 | Second agent adapter (ACP), MCP policy, OpenTelemetry | hardening §2 | L | Interoperability and observability |
 | 14 | Desktop shell, packaging, CI | hardening §6 | M | Polish |
 
