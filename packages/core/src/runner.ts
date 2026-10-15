@@ -5,6 +5,7 @@ import { ClaudeStreamParser } from './claude-stream.ts';
 import type { Env } from './git.ts';
 import type { McpLaunch } from './mcp-policy.ts';
 import { notify, type RunObserver } from './observe.ts';
+import { prepareSandbox, watchMemory, type SandboxConfig, type SandboxRequest } from './sandbox.ts';
 import type { SeatId } from './seats.ts';
 
 export interface RunRequest {
@@ -22,6 +23,8 @@ export interface RunRequest {
   timeoutMs?: number;
   /** Told about handshakes, tool calls and permission decisions as they happen; see observe.ts. */
   observer?: RunObserver;
+  /** Wraps the agent in the builder sandbox (see sandbox.ts). Absent = config.toml decides, with no event sink. */
+  sandbox?: SandboxRequest;
 }
 
 export interface RunResult {
@@ -32,6 +35,8 @@ export interface RunResult {
   cancelled?: boolean;
   /** Stopped because `timeoutMs` elapsed. */
   timedOut?: boolean;
+  /** Stopped because the agent's processes passed the sandbox memory ceiling. */
+  memoryExceeded?: boolean;
 }
 
 export interface AgentRunner {
@@ -52,15 +57,19 @@ export interface ClaudeCodeOptions {
   observe?: (req: RunRequest) => boolean;
   /** Keep tool results in the events passed to the observer (content capture). */
   captureResults?: boolean;
+  /** Sandbox settings for every run (tests that use a stand-in `claude` turn it off). Unset reads `[sandbox]` from config.toml. */
+  sandbox?: SandboxConfig;
 }
 
 export class ClaudeCodeRunner implements AgentRunner {
   private readonly opts: ClaudeCodeOptions;
+  /** Sandbox settings for every run; unset reads `[sandbox]` from config.toml. A request's own `sandbox.config` wins. */
+  sandbox?: SandboxConfig;
   constructor(opts: ClaudeCodeOptions = {}) {
     this.opts = opts;
   }
 
-  run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
+  async run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
     const mcp = this.opts.mcp?.(req);
     const stream = this.opts.observe?.(req) === true;
     const args = [
@@ -76,13 +85,16 @@ export class ClaudeCodeRunner implements AgentRunner {
       ...(stream ? ['--output-format', 'stream-json', '--verbose'] : []),
     ];
     if (req.model) args.push('--model', req.model);
+    // Throws in `required` mode when the sandbox cannot be applied: an agent never runs unprotected by accident.
+    const sb = await prepareSandbox(req, this.opts.command ?? 'claude', args, this.sandbox ?? this.opts.sandbox);
     const started = Date.now();
     return new Promise((resolve, reject) => {
       // Own process group, so a kill reaches everything the agent started, not just `claude`.
-      const child = spawn(this.opts.command ?? 'claude', args, { cwd: req.cwd, env: req.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+      const child = spawn(sb?.command ?? this.opts.command ?? 'claude', sb?.args ?? args, { cwd: req.cwd, env: sb?.env ?? req.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
       let output = '';
       let cancelled = false;
       let timedOut = false;
+      let memoryExceeded = false;
       let violation: string | undefined;
       let killTimer: NodeJS.Timeout | undefined;
       const killGroup = (sig: NodeJS.Signals) => {
@@ -96,7 +108,13 @@ export class ClaudeCodeRunner implements AgentRunner {
       if (req.signal?.aborted) onAbort();
       else req.signal?.addEventListener('abort', onAbort, { once: true });
       const timer = req.timeoutMs ? setTimeout(() => { timedOut = true; stop(); }, req.timeoutMs) : undefined;
+      const stopMemory = sb && child.pid ? watchMemory(child.pid, sb.memoryMb, (mb) => {
+        memoryExceeded = true;
+        req.sandbox?.onEvent?.('sandbox.memory_exceeded', { seat: req.seat, usedMb: Math.round(mb), limitMb: sb.memoryMb });
+        stop();
+      }) : undefined;
       const cleanup = () => {
+        stopMemory?.();
         clearTimeout(timer);
         clearTimeout(killTimer);
         req.signal?.removeEventListener('abort', onAbort);
@@ -121,8 +139,8 @@ export class ClaudeCodeRunner implements AgentRunner {
       let stderr = '';
       child.stdout.on('data', parser ? (b: Buffer) => parser.push(b.toString()) : take);
       child.stderr.on('data', parser ? (b: Buffer) => { stderr += b.toString(); onChunk?.(b.toString()); } : take);
-      child.on('error', (e) => { cleanup(); reject(e); });
-      child.on('close', (code) => {
+      child.on('error', (e) => { cleanup(); void sb?.dispose(); reject(e); });
+      child.on('close', async (code) => {
         cleanup();
         // Anything left in the group after the leader exits is cleaned up too.
         killGroup('SIGKILL');
@@ -130,7 +148,9 @@ export class ClaudeCodeRunner implements AgentRunner {
           parser.end();
           output = parser.output + output + stderr + (violation ? `\n[octet] ${violation}\n` : '');
         }
-        resolve({ exitCode: violation ? 1 : code ?? 1, output, durationMs: Date.now() - started, ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}) });
+        const durationMs = Date.now() - started;
+        await sb?.finish().catch(() => {});
+        resolve({ exitCode: violation ? 1 : code ?? 1, output, durationMs, ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}), ...(memoryExceeded ? { memoryExceeded } : {}) });
       });
       child.stdin.end(req.prompt);
     });

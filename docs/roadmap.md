@@ -66,7 +66,7 @@ Each step is shippable on its own and leaves the product working.
 | 9 | ~~Scout + Chair (P4)~~ **Done** (parallel Scouts and the free-text chat panel are not built) | planning §6 | M | Better plans, fewer wrong guesses |
 | 10 | ~~Autonomy levels + planning evals (P5)~~ **Done** (autonomy shipped with the scheduler in step 6; evals in `packages/core/test/evals/`) | planning §8 | M | Makes quality measurable before trusting more autonomy |
 | 11 | ~~Jira and chat intake~~ **Done** (Jira and Slack against fakes and local servers only; no write-back) | intake §4, §5 | M each | Need credentials from you |
-| 12 | Builder sandboxing | hardening §1 | L | Required before running on code you do not trust |
+| 12 | ~~Builder sandboxing~~ **Done** (macOS Seatbelt around the whole agent, default `auto`; limits listed in hardening §1) | hardening §1 | L | Required before running on code you do not trust |
 | 13 | Second agent adapter (ACP), MCP policy, OpenTelemetry | hardening §2 | L | Interoperability and observability |
 | 14 | ~~Desktop shell, packaging, CI~~ **Done except the desktop shell, which is an unbuilt scaffold** (doctor, config validation, daemon lock, commit signing, PATH installer, completion, CI, check script, browser smoke test; see hardening §6) | hardening §6 | M | Polish |
 

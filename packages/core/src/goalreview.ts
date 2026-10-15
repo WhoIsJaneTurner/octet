@@ -5,6 +5,7 @@ import { childEnv } from './identity.ts';
 import { addBead, parseVerdict, type Ctx, type Verdict } from './orchestrate.ts';
 import { loadPersona } from './personas.ts';
 import { getProject } from './project.ts';
+import { sandboxFor } from './sandbox.ts';
 import type { Bead } from './store.ts';
 
 const GOAL_DIFF_CAP = 80_000;
@@ -39,7 +40,7 @@ export async function reviewGoal(ctx: Ctx, goalId: string): Promise<{ verdict: V
 
   ctx.store.log({ kind: 'goal.review.started', goalId: goal.id, seat: 'reviewer' });
   const result = await ctx.runner.run(
-    { seat: 'reviewer', cwd: goal.worktree, prompt, systemPrompt: loadPersona('reviewer'), env, readOnly: true },
+    { seat: 'reviewer', cwd: goal.worktree, prompt, systemPrompt: loadPersona('reviewer'), env, readOnly: true, ...sandboxFor(ctx, { goalId: goal.id, seat: 'reviewer' }) },
   );
   const parsed = result.exitCode === 0 ? parseVerdict(result.output) : { verdict: 'inconclusive' as const, feedback: result.output.slice(-2000) };
   ctx.store.log({ kind: 'goal.review.verdict', goalId: goal.id, seat: 'reviewer', data: { verdict: parsed.verdict, feedback: parsed.feedback.slice(0, 4000), truncated } });

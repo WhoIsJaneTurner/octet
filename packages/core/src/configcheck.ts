@@ -22,7 +22,7 @@ type Schema = Record<string, Kind>;
 type Table = Record<string, unknown>;
 
 /** Sections with dynamic names (seats, server names) that their own parser validates strictly; the table checker leaves them alone. */
-const SELF_VALIDATED = new Set(['agents', 'mcp', 'telemetry']);
+const SELF_VALIDATED = new Set(['agents', 'mcp', 'telemetry', 'sandbox']);
 
 /** config.toml. A nested section such as [intake.github] is written `intake.github`. */
 export const CONFIG_SCHEMA: Record<string, Schema> = {

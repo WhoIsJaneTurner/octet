@@ -11,6 +11,7 @@ import {
   type PlanBead, type PlanLimits, type RequestSize, type ScoutReport, type Validated,
 } from './plan.ts';
 import { getProject, type Project } from './project.ts';
+import { sandboxFor } from './sandbox.ts';
 import type { SeatId } from './seats.ts';
 import { newId, type Approval, type Bead, type Clarification, type Goal, type PlanRecord, type Request } from './store.ts';
 import { openVault, Vault } from './vault.ts';
@@ -49,6 +50,7 @@ async function ask(
   const r = await ctx.runner.run({
     seat: a.seat, cwd: a.goal.worktree, prompt: a.prompt, systemPrompt: loadPersona(a.persona ?? a.seat),
     env: childEnv(identity), readOnly: true, timeoutMs: (ctx.limits ?? DEFAULT_LIMITS).runTimeoutMs,
+    ...sandboxFor(ctx, { goalId: a.goal.id, seat: a.seat }),
   });
   return { output: r.output, exitCode: r.exitCode };
 }

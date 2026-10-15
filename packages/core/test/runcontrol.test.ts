@@ -5,7 +5,7 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
-  addBead, cancelBead, ClaudeCodeRunner, createGoal, DEFAULT_LIMITS, FakeRunner, parseIdentities, readRunOutput, reconcileRunning,
+  addBead, cancelBead, ClaudeCodeRunner, createGoal, DEFAULT_LIMITS, DEFAULT_SANDBOX, FakeRunner, parseIdentities, readRunOutput, reconcileRunning,
   runBead, Store, type AgentRunner, type Ctx,
 } from '../src/index.ts';
 
@@ -144,7 +144,7 @@ test('ClaudeCodeRunner kills the whole process group, grandchildren included, on
   // A stand-in `claude` that starts a long-lived grandchild and records its pid.
   writeFileSync(join(bin, 'claude'), `#!/bin/sh\nsleep 300 &\necho $! > "${pidFile}"\nwait\n`, { mode: 0o755 });
   const ac = new AbortController();
-  const runner = new ClaudeCodeRunner();
+  const runner = new ClaudeCodeRunner({ sandbox: { ...DEFAULT_SANDBOX, mode: 'off' } });
   const p = runner.run({
     seat: 'engineer', cwd: bin, prompt: 'x', systemPrompt: 'x', signal: ac.signal,
     env: { PATH: `${bin}:${process.env.PATH}` } as never,

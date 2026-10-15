@@ -4,6 +4,7 @@ import { loadInterop, type InteropConfig } from './interop-config.ts';
 import { acpServersFor, mcpFor } from './mcp-policy.ts';
 import { ObservedRunner } from './observed-runner.ts';
 import { OtlpHttpExporter, Tracer } from './otel.ts';
+import type { SandboxConfig } from './sandbox.ts';
 import { ClaudeCodeRunner, FakeRunner, type AgentRunner, type RunRequest, type RunResult } from './runner.ts';
 import type { SeatId } from './seats.ts';
 import type { Store } from './store.ts';
@@ -43,6 +44,8 @@ export interface BuildRunnerOptions {
   fetchImpl?: typeof fetch;
   /** Claude Code executable, for tests and non-standard installs. */
   claudeCommand?: string;
+  /** Sandbox settings for Claude Code runs; unset reads `[sandbox]` from config.toml. Tests with a stand-in `claude` turn it off. */
+  sandbox?: SandboxConfig;
 }
 
 /**
@@ -61,6 +64,7 @@ export function buildRunner(opts: BuildRunnerOptions): RunnerBundle {
 
   const claude = new ClaudeCodeRunner({
     ...(opts.claudeCommand ? { command: opts.claudeCommand } : {}),
+    ...(opts.sandbox ? { sandbox: opts.sandbox } : {}),
     mcp: (req) => mcpFor(config.mcp, req.seat, req.readOnly === true),
     // Tool calls are only visible in stream-json, so it is read when something consumes them.
     observe: (req) => !!exporter || mcpFor(config.mcp, req.seat, req.readOnly === true).servers.length > 0,

@@ -38,3 +38,5 @@ export * from './mcp-policy.ts';
 export * from './interop-config.ts';
 export * from './observed-runner.ts';
 export * from './agents.ts';
+export * from './sandbox.ts';
+export * from './netproxy.ts';
