@@ -44,7 +44,8 @@ Everything below is implemented, tested (125 unit and integration tests) and pus
 | Warden, Courier | Built (deterministic code, no model) |
 | Architect | Built (read-only, structured output, one retry) |
 | Marshal | Built as code: decomposition and the scheduler. The optional model refinement pass is not built |
-| Chair, Scout | Personas written; Chair is a stub (`size = small`, no questions) and there is no Scout runtime yet. Step 9 |
+| Chair | Built: proceed-or-ask (at most three questions, two rounds), size with code-side bumping, trivial changes become a one-bead plan |
+| Scout | Built: read-only, mandatory `unknowns`, report stored in the vault and fed to the Architect |
 
 ---
 
@@ -62,8 +63,8 @@ Each step is shippable on its own and leaves the product working.
 | 6 | ~~Scheduler loop (P3)~~ **Done**, with autonomy levels | planning §7 | L | The "describe it, approve the plan, come back to a PR" experience |
 | 7 | ~~Merge-conflict handling and stale-base rebasing~~ **Done** | hardening §4 | M | Needed the moment two beads touch the same file |
 | 8 | GitHub issue intake | intake §3 | M | First external source; read-only |
-| 9 | Scout + Chair conversational intake (P4) | planning §6 | M | Better plans, fewer wrong guesses |
-| 10 | Autonomy levels + planning evals (P5) | planning §8 | M | Makes quality measurable before trusting more autonomy |
+| 9 | ~~Scout + Chair (P4)~~ **Done** (parallel Scouts and the free-text chat panel are not built) | planning §6 | M | Better plans, fewer wrong guesses |
+| 10 | ~~Autonomy levels + planning evals (P5)~~ **Done** (autonomy shipped with the scheduler in step 6; evals in `packages/core/test/evals/`) | planning §8 | M | Makes quality measurable before trusting more autonomy |
 | 11 | Jira and chat intake | intake §4, §5 | M each | Need credentials from you |
 | 12 | Builder sandboxing | hardening §1 | L | Required before running on code you do not trust |
 | 13 | Second agent adapter (ACP), MCP policy, OpenTelemetry | hardening §2 | L | Interoperability and observability |

@@ -131,7 +131,7 @@ The model proposes the size; code can override it. For example, a request that m
 
 ## 6. Milestones
 
-**Status:** P1, P2 and P3 are built (see roadmap). P4 and P5 remain. Differences from this spec as built: the plan record keeps `request_id`; `goals.paused` is a column; escalations are a table (`escalations`) shown in the inbox; model refinement of beads is not built; related-plan search runs on the request title because a Scout does not exist yet.
+**Status:** P1 to P5 are built (see roadmap). Differences from this spec as built: the plan record keeps `request_id`; `goals.paused` is a column; escalations are a table (`escalations`) shown in the inbox; model refinement of beads is not built; related-plan search runs on the request title because a Scout does not exist yet.
 
 ### P1. Architect and the plan gate (M)
 
@@ -230,3 +230,10 @@ Keep each under about 60 lines; long prompts degrade.
 2. **Parallel Scouts:** worth it only for large requests. Defer until P4 proves the single Scout is a bottleneck.
 3. **Marshal model refinement:** off by default; turn on only if evals show the Architect's bead lists often need tightening.
 4. **Model choice per seat:** a larger model for Architect, a smaller one for Scout and Reviewer. Add a `model` setting per seat once there is eval data to justify it.
+
+## 12. As built: Chair, Scout, effort scaling, evals
+
+- **Flow in `planRequest`:** Chair (ask or proceed) → size (raised in code if the request names more than `planning.bump_files` files or spans several directories; never lowered) → trivial: one-bead plan, no Scout or Architect, still at the plan gate → otherwise Scout → Architect (small requests are limited to 3 beads).
+- **Questions:** the Chair asks at most three, for at most two rounds; after that it is made to proceed and the unanswered questions become stated assumptions. Questions show in the inbox (and `octet clarification list|answer`); answers are appended to the request and the vault copy, then the Chair looks again. A "proceed" assessment is remembered per goal, so a re-plan after feedback does not ask or scout again.
+- **Not built:** parallel Scouts per area (still one Scout), the local free-text chat panel (`octet ask` needs a project; the inbox questions are the conversational part), model refinement of beads by the Marshal.
+- **Evals:** `pnpm evals` runs four tasks against the real model on throwaway repos (add a function and test, rename across files, an ambiguous request, a prompt injection inside a file the Scout reads) and appends one JSON line per task to `<data>/evals/results.jsonl` with a hash of the persona prompts. `pnpm evals:report` prints a table over time. Assertions are structural (bead count, files covered, gates not skipped, nothing changed in the repo, no outward approval). The scoring itself is tested in the default suite against scripted good and bad replies (`evals-harness.test.ts`), so a regression in the checks shows up without a model.

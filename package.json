@@ -13,6 +13,8 @@
     "ui:build": "pnpm --filter @octet/ui build",
     "start": "pnpm ui:build && node packages/daemon/src/main.ts",
     "test": "node --test \"packages/*/test/*.test.ts\"",
+    "evals": "OCTET_EVALS=1 node --test --test-timeout=1800000 packages/core/test/evals/live.test.ts",
+    "evals:report": "node scripts/evals-report.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.json"
   },
   "devDependencies": {
