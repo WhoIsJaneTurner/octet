@@ -13,7 +13,7 @@ How work enters Octet. All sources produce the same thing, a **request**, and ev
 
 ## 2. The request model and typed intake (built)
 
-Implemented in `packages/core/src/intake.ts`. `submitRequest` returns `{ request, duplicate }`; `routeRequest` and `rejectRequest` only act on `new` or `routed` requests. The UI route fixes `source: 'ui'` and the requester, so a caller cannot spoof them. `ask` in the CLI requires a project; leaving it unrouted is a UI option. The `planning` and `planned` statuses and `goalId` exist but nothing sets them until the Architect lands. An edit to an already-ingested external request is not applied yet (needed with the GitHub adapter).
+Implemented in `packages/core/src/intake.ts`. `submitRequest` returns `{ request, duplicate }`; `routeRequest` and `rejectRequest` only act on `new` or `routed` requests. The UI route fixes `source: 'ui'` and the requester, so a caller cannot spoof them. `ask` in the CLI requires a project; leaving it unrouted is a UI option. The `planning` and `planned` statuses and `goalId` exist but nothing sets them until the Architect lands. An edit to an already-ingested external request is applied only while it is still `new` (see section 10).
 
 ```ts
 interface Request {
@@ -118,3 +118,92 @@ allowed_users = ["U012ABCDEF"]
 1. **Which source first.** Recommendation: typed intake (§2), then GitHub issues. Both need no new credentials.
 2. **Plan approval from chat** is deliberately out of scope for version 1. Revisit once the local flow is solid.
 3. **Public repos.** Decide whether Octet should ever act on requests from non-allow-listed authors. Default: no.
+
+## 10. As built (GitHub issues, Jira, Slack)
+
+Roadmap steps 8 and 11. Everything below was built and tested against fakes and local servers only. **Nothing was run against real GitHub, Jira or Slack**; see "Not verified live".
+
+### Code
+
+| File | What |
+|---|---|
+| `core/src/intake-sources.ts` | `IntakeAdapter` (`name`, `fetchNew(): Promise<IntakeItem[]>`), `FakeIntake`, `pollIntake(ctx, adapters)` |
+| `core/src/intake-config.ts` | `loadIntake()` for the `[intake.*]` tables, the mode-600 secrets reader, Jira and Slack credential loaders |
+| `core/src/intake-github.ts` | `GithubIntake`, `githubAdapters`, injectable `GhFn` |
+| `core/src/intake-jira.ts` | `JiraIntake`, `jiraAdapters`, `adfToText` |
+| `core/src/intake-chat.ts` | `SlackIntake` (the logic), `SlackTransport` interface, `FakeSlackTransport`, `SlackSocketTransport` (Socket Mode) |
+| `core/src/intake-runtime.ts` | `IntakeService`: timers, Slack connection, `status()` |
+
+`pollIntake` submits every item through `submitRequest`, so dedup on `(source, externalRef)`, the body cap and the audit entry are the typed-intake ones. It never throws: a failing adapter logs `intake.error` and the others still run; a source that keeps failing with the same message is logged once until it recovers or the message changes. An item the store refuses (bad title, unknown project) is logged `intake.error` and skipped. A new item flagged `held` is stored with no project and logged `intake.held`.
+
+An edited item (same key, different title or body) updates the request through `Store.updateRequestText`, which only changes a row whose status is still `new` (`UPDATE ... WHERE status = 'new'`), and logs `request.updated`. Once you route, plan or reject a request, later edits are ignored. Title and body are both refreshed.
+
+### GitHub
+
+- Per project: `gh issue list --repo <slug> --label <label> --state open --limit 100 --json number,title,body,author,url,updatedAt,labels`, run with the project identity's environment and token (like `forge.ts`, but asynchronous so a slow poll never blocks the daemon). The repo is the project's `origin` remote. Read-only: no comment, label or close is ever sent.
+- The owner guard (`checkRemote`) runs first. A project whose remote the identity does not own is an adapter error and no `gh` call is made.
+- Routing: the repo decides. Order: an `octet:<project>` label naming a project that lives in the **same repo** (and passes the owner guard with its own identity); else the repo's single project; else unrouted. Two such labels, or a label naming any other project, leave it unrouted. Issue text never routes.
+- Public repos (`gh repo view --json isPrivate`; if that fails the repo is treated as public): an author not in `allowed_authors` (case-insensitive) is **held**: the request is still created so you see it, but as `new`, unrouted, with an `intake.held` event. An empty `allowed_authors` on a public repo holds everything. On a private repo the list is enforced only if it is non-empty. The inbox shows a "held for you" line.
+- The stored body is the issue URL, a blank line, then the issue body. Requester is the author login.
+
+### Jira
+
+- `POST <site>/rest/api/3/search/jql` with the saved JQL, up to four pages of 50, basic auth (account email plus API token), `redirect: 'manual'` (a redirect is an error, so credentials cannot follow one to another host), 30 s timeout. The site must be `https` (plain `http` is accepted only for loopback, for tests).
+- Credentials: `<config dir>/jira-<identity>.toml` with `site`, `email`, `token`, one file per identity (the project's identity picks the file). The file is refused unless it is a regular file (symlinks refused) with no group or other permission bits (anything looser than 600). `intake.jira.site`, if also set, must match the file's site. The token is never logged or put in an error.
+- Mapping: key to `externalRef` (keys not matching `ABC-123` are skipped), summary to title, description to body via `adfToText`, reporter (display name, else email, else account id) to requester, the saved filter's project to `project`. Attachments are not requested and media nodes are dropped.
+- `adfToText` handles paragraphs, headings, hard breaks, bullet and ordered lists, code blocks, quotes, rules, tables (cells joined with ` | `), mentions, emoji, status, links (`text (url)`), and keeps the text of unknown node types. Depth and output are bounded.
+- **Write-back is not built.** `allowed_transitions` is parsed and ignored. When it is built it must be a new approval kind handled like the Courier's PR comment, limited to the listed transitions.
+
+### Slack
+
+- Socket Mode over Node's global `WebSocket`: `apps.connections.open` with the app token, then an outbound connection. No inbound port. Each envelope is acknowledged before any work; reconnects with backoff (1 s doubling to 60 s); a `disconnect` envelope triggers a reconnect.
+- Credentials: `<config dir>/slack.toml` with `app_token` (`xapp-`) and `bot_token` (`xoxb-`), same mode-600 rule. **The signing secret is not used**: Socket Mode requests carry no HTTP signature (the secret `wss://` URL is the trust anchor), so the signature and timestamp check in section 5.2 does not apply. Replay protection is the requests table instead: `externalRef` is `<channel>:<ts>` for a mention and `slash:<trigger_id>` for the slash command, so a redelivered envelope or Slack retry can never create a second request or a second reply.
+- Triggers: `app_mention`, and the configured slash command (default `/octet`). Everything else (other events, bot messages, edits) is ignored silently.
+- Allow-list: `allowed_users` (Slack user ids). Anyone else is dropped with an `intake.dropped` event (user id and reason; the message text is not logged) and gets no reply.
+- Syntax: `[ask] [project:<name>] free text`. Only the `project:` argument names a project; an unknown name leaves the request unrouted. Without it, `intake.chat.project` (if set) routes, else the request waits in the inbox. The first line is the title, the whole text is the body.
+- Replies go to the thread (a slash command has no thread, so to the channel) and contain only Octet's own text: the request id, whether it is routed, and a link to the inbox (`inbox_url`, default `http://127.0.0.1:4747/`). They never echo the request text. There is no approval from chat.
+- Not built: the Chair's questions and status updates in the thread (the Chair has no runtime yet), rate limiting of dropped-user log entries.
+
+### Config
+
+```toml
+[intake.github]
+enabled = false
+label = "octet"            # the opt-in; routing labels are "<label>:<project>"
+poll_seconds = 300         # floor 30
+allowed_authors = []       # required (non-empty) for public repos
+projects = ["myapp"]       # optional; default is every configured project
+
+[intake.jira]
+enabled = false
+site = "https://example.atlassian.net"   # optional, must match the credentials file
+jql = 'project = XYZ AND labels = octet AND statusCategory = "To Do"'
+project = "myapp"
+poll_seconds = 300
+allowed_transitions = []   # parsed, unused: write-back is not built
+[intake.jira.projects.other]             # more filters, one per project
+jql = '...'
+
+[intake.chat]
+enabled = false
+allowed_users = ["U012ABCDEF"]
+command = "/octet"
+project = "myapp"          # optional: route all chat requests here
+inbox_url = "http://127.0.0.1:4747/"
+```
+
+### Daemon, CLI, UI
+
+- The daemon builds an `IntakeService` from `[intake.*]`, polls GitHub and Jira every `poll_seconds` (first poll at start-up, no overlapping polls, adapters rebuilt each poll so new projects are picked up), starts Slack if enabled, and a source that fails to start only shows an error. `GET /api/state` has `intake: { sources: [{ kind, enabled, detail, lastPollAt, lastError }], held: [requestId] }`. Tests that start a daemon should pass `intake: { config }` so a real `config.toml` is never read.
+- `octet intake status` prints what is enabled, whether the credential files are readable and mode 600, and recent `intake.*` events. `octet intake poll` polls GitHub and Jira once now (Slack is push-only and runs in the daemon).
+- The inbox shows one line: each enabled source with its last poll time or last error, and the requests held for you.
+
+### Tests
+
+`core/test/intake-sources.test.ts` (dedup, error isolation, edit-only-while-new, GitHub with a fake `gh`, owner guard, allow-list hold, routing labels, injection), `core/test/intake-jira.test.ts` (ADF conversion, token-file mode and symlink, a local HTTP server standing in for Jira, injection), `core/test/intake-chat.test.ts` (parsing, allow-list, dedup and replay, routing, no-approval, and the real `SlackSocketTransport` against a local fake Slack with a hand-rolled WebSocket server), `daemon/test/intake.test.ts` (polling, `state.intake`, failure reporting). Injection cases assert on the stored request, the goals, beads, approvals and PR tables and the event kinds, never on model text.
+
+### Not verified live
+
+- No call was made to real GitHub, Jira or Slack. The `gh` argument list, the Jira `search/jql` request and response shape, and the Slack Socket Mode envelope shapes are written from the public API documentation as remembered, and exercised only against stand-ins written by the same author. Run `octet intake poll` against a throwaway repo and Jira project before trusting them.
+- `gh issue list` behaviour for pagination beyond 100 issues, Jira Cloud versus Data Center differences (Data Center uses API v2 and different auth), and Slack's real disconnect and `retry_attempt` behaviour are untested.
+- The unrouted/held UI line was type-checked but not looked at in a browser.

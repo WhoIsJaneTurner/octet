@@ -3,6 +3,7 @@ import { api, useOctet } from './api';
 import { Detail } from './Detail';
 import { Inbox } from './Approvals';
 import { NewRequest, RequestList } from './Requests';
+import { IntakeLine } from './IntakeLine';
 import { Board, Council, Log, PrCard } from './views';
 import { IdentityTag } from './ui';
 
@@ -147,6 +148,7 @@ export function App() {
               onDone={() => void refresh()} setError={setError} />
           )}
           {tab === 'board' && <Board goal={goal} beads={goalBeads} selected={bead?.id} onSelect={select} tag={identityTag} />}
+          {tab === 'inbox' && <IntakeLine intake={state.intake} requests={state.requests} />}
           {tab === 'inbox' && <RequestList requests={state.requests} projects={state.projects} onDone={() => void refresh()} setError={setError} />}
           {tab === 'inbox' && <Inbox approvals={state.approvals} goals={state.goals} order={idOrder} onDone={() => void refresh()} setError={setError} />}
           {tab === 'log' && <Log events={state.events} />}

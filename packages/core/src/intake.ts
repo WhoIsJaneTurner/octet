@@ -5,7 +5,7 @@ import type { Request, RequestSource } from './store.ts';
 
 export const MAX_REQUEST_BODY = 20_000;
 export const MAX_REQUEST_TITLE = 200;
-const TRUNCATED = '\n\n[truncated by Octet: the original was longer than 20,000 characters]';
+export const TRUNCATED = '\n\n[truncated by Octet: the original was longer than 20,000 characters]';
 
 export interface RequestInput {
   source: RequestSource;

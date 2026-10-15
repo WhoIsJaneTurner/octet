@@ -5,7 +5,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { FakeForge, FakeRunner, Store } from '@octet/core';
+import { FakeForge, FakeRunner, loadIntake, Store } from '@octet/core';
 import { startDaemon, type Daemon } from '../src/server.ts';
 
 let d: Daemon;
@@ -43,7 +43,7 @@ before(async () => {
   writeFileSync(join(uiDir, 'index.html'), '<meta name="octet-token" content="__OCTET_TOKEN__">');
   writeFileSync(join(uiDir, 'assets', 'a.js'), 'console.log(1)');
   writeFileSync(join(home, 'secret.txt'), 'top secret');
-  d = await startDaemon({ store: new Store(':memory:'), runner, forge, runsDir, identitiesFile, projectsFile, uiDir });
+  d = await startDaemon({ store: new Store(':memory:'), runner, forge, runsDir, identitiesFile, projectsFile, uiDir, intake: { config: loadIntake('/nonexistent') } });
 });
 after(() => d.close());
 

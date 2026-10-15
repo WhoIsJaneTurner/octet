@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import {
   addBead, addProject, approveBead, beadDiff, cancelBead, createGoal, decideApproval, loadIdentities, loadLimits, loadProjects,
-  loadReview, OctetError, readRunOutput, reconcileRunning, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestChanges, requestDelivery, requestPrecomment, reviewBead, runBead, SEATS, type AgentRunner, type Ctx, type Forge, type Store,
+  IntakeService, loadIntake, loadReview, OctetError, readRunOutput, reconcileRunning, rejectRequest, routeRequest, runsDir, submitRequest, refreshAllPrs, requestChanges, requestDelivery, requestPrecomment, reviewBead, runBead, SEATS, type AgentRunner, type Ctx, type Forge, type IntakeConfig, type IntakeDeps, type Store,
 } from '@octet/core';
 
 export interface DaemonOptions {
@@ -20,6 +20,8 @@ export interface DaemonOptions {
   projectsFile?: string;
   /** Where run logs are kept. Defaults to the data directory. */
   runsDir?: string;
+  /** Intake sources. Defaults to the `[intake.*]` tables of config.toml; tests inject fakes through `deps`. */
+  intake?: { config?: IntakeConfig; deps?: IntakeDeps };
 }
 
 export interface Daemon {
@@ -84,6 +86,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     identities: loadIdentities(opts.identitiesFile),
     projects: loadProjects(opts.projectsFile),
   };
+  const intake = new IntakeService(ctx, opts.intake?.config ?? loadIntake(), opts.intake?.deps);
   const outputs = new Map<string, string>();
   const clients = new Set<ServerResponse>();
   const running = new Set<string>();
@@ -111,6 +114,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     running: store.listBeads().filter((b) => b.status === 'running').map((b) => b.id),
     reviewing: [...reviewing],
     review: ctx.review,
+    intake: intake.status(),
   });
 
   const startRun = (beadId: string) => {
@@ -283,6 +287,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
   // Catches runs whose owner died after startup (a CLI run killed with no daemon watching).
   const sweep = setInterval(() => { try { reconcileRunning(store); } catch { /* retried next sweep */ } }, 15_000);
   sweep.unref();
+  intake.start();
 
   const server = createServer((req, res) => {
     void (async () => {
@@ -324,6 +329,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<Daemon> {
     close: () => new Promise((resolve) => {
       clearInterval(poll);
       clearInterval(sweep);
+      intake.stop();
       for (const c of clients) c.end();
       server.close(() => resolve());
       server.closeAllConnections();
