@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
-import { acquireDaemonLock, ClaudeCodeRunner, dbFile, FakeRunner, OctetError, Store, type DaemonLock } from '@octet/core';
+import { acquireDaemonLock, buildRunner, dbFile, OctetError, Store, type DaemonLock } from '@octet/core';
 import { startDaemon } from './server.ts';
 
 const fake = process.argv.includes('--fake') || process.env.OCTET_FAKE === '1';
@@ -22,10 +22,12 @@ const lock = takeLock();
 // Taken out of the environment so agent child processes never inherit it.
 const token = process.env.OCTET_TOKEN;
 delete process.env.OCTET_TOKEN;
+const store = new Store(dbFile());
+const { runner, shutdown } = buildRunner({ store, fake });
 
 const daemon = await startDaemon({
-  store: new Store(dbFile()),
-  runner: fake ? new FakeRunner() : new ClaudeCodeRunner(),
+  store,
+  runner,
   uiDir: fileURLToPath(new URL('../../ui/dist/', import.meta.url)),
   port,
   ...(token ? { token } : {}), // set by the desktop shell, which keeps it in memory
@@ -33,7 +35,7 @@ const daemon = await startDaemon({
 lock.setPort(daemon.port);
 
 console.log(`octet daemon listening on http://127.0.0.1:${daemon.port}/  ${fake ? '(FAKE agents: no model calls)' : ''}`);
-const stop = () => void daemon.close().then(() => { lock.release(); process.exit(0); });
+const stop = () => void daemon.close().then(shutdown).then(() => { lock.release(); process.exit(0); });
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
 process.on('exit', () => lock.release());

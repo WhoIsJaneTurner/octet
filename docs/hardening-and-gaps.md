@@ -42,6 +42,73 @@ Builders currently run with MCP disabled (`--strict-mcp-config` with an empty co
 
 Emit traces using the GenAI conventions: `invoke_agent {seat}` per run with `execute_tool` children where the adapter reports tool calls. Keep attribute names behind one module because the conventions were still marked "Development". Content capture off by default. Export to a local OTLP endpoint only if one is configured.
 
+### 2.4 As built (roadmap step 13)
+
+All in `packages/core/src` as new files, tested without any model or external service. Edits to existing files are listed at the end.
+
+**Pinned revisions** (constants in code, so a bump is one edit):
+
+| Standard | Pinned | Where |
+|---|---|---|
+| Agent Client Protocol | `protocolVersion` 1, schema v1.25.0 (released 2026-10-09). A v2 alpha exists and is not targeted | `ACP_PROTOCOL_VERSION`, `ACP_SCHEMA_REVISION` in `acp.ts` |
+| Model Context Protocol | specification revision 2026-07-28 (the "current" revision on modelcontextprotocol.io when written). Octet does not speak MCP: it decides which servers an agent is launched with, and the agent negotiates the revision with each server | `MCP_SPEC_REVISION` in `mcp-policy.ts` |
+| OpenTelemetry GenAI semantic conventions | `open-telemetry/semantic-conventions-genai` at commit `f3c6d0c` (2026-10-14), `gen-ai-agent-spans.md` and `gen-ai-spans.md`, status Development, referencing core semconv v1.44.0. The conventions have moved out of the main semantic-conventions repository | `SEMCONV_REVISION` in `otel-attrs.ts` |
+| OTLP | OTLP/HTTP with a JSON body: `POST {endpoint}/v1/traces`, hex trace and span ids, int64 as decimal strings | `otel.ts` |
+
+**Config** (`~/.config/octet/config.toml`, parsed by `parseInterop` in `interop-config.ts`; mistakes such as an unknown seat, or an allow-list naming an undefined server, fail at startup with a message naming the key):
+
+```toml
+[agents]                      # seat -> command that speaks ACP on stdio; absent or "claude" = Claude Code
+reviewer = "my-agent --acp"   # a string (split like a shell would, but no shell is used) or an array
+
+[mcp.servers.docs]            # servers Octet may hand to an agent
+command = "docs-mcp"          # or: type = "http", url = "https://...", headers = { ... }
+args = ["--stdio"]
+env = { DOCS_ROOT = "/srv/docs" }
+tools = ["search"]            # optional: pin tool names; omitted = the whole server
+read_only = true              # only servers marked so are available to read-only seats (Reviewer)
+[mcp.allow]                   # seat -> server names; default none
+engineer = ["docs"]
+
+[telemetry]
+otlp_endpoint = "http://127.0.0.1:4318"   # unset = nothing is exported
+capture_content = false                    # prompts, outputs, tool arguments and results: off unless true
+[telemetry.headers]                        # optional, e.g. an auth header for the collector
+```
+
+**ACP adapter** (`acp.ts`; policy in `agent-policy.ts`). `AcpRunner` implements `AgentRunner`. It spawns the command in its own process group (SIGTERM, then SIGKILL after 5 s, and a group kill again on exit, like `ClaudeCodeRunner`), sends `initialize` with `protocolVersion` 1, refuses an agent that answers with another version, calls `session/new` with the worktree as `cwd` and the seat's allow-listed stdio MCP servers, then runs one `session/prompt` (persona and assignment in one text block, since ACP has no system-prompt field). `agent_message_chunk` text streams to `onChunk` and becomes `RunResult.output`. `RunRequest.signal` and `timeoutMs` kill the group; an agent that never answers `initialize` fails after 30 s. Requests from the agent are answered under these rules, and every decision is reported to the observer and lands in the audit log as `agent.permission`:
+
+- `fs/read_text_file`, `fs/write_text_file`: absolute paths only, resolved through symlinks, refused if they leave the worktree. Writes are refused for read-only seats and anywhere under `.git` (a hook would run when Octet later commits).
+- `terminal/*`: offered only to seats that may write. A command line containing `git push`, `gh pr`, `gh repo` or `gh auth` is refused; the patterns are derived from `DENIED_TOOLS`, so the two lists cannot drift. The match is deliberately broad (`git commit -m "push"` is refused too). Agent-supplied environment variables apply except `LD_*`, `DYLD_*`, `GIT_SSH*`, `GIT_ASKPASS`, `SSH_*`. Commands run with the same token-free environment as the agent.
+- `session/request_permission`: the same checks on the tool call's title, `rawInput`, locations and `kind`. Read-only seats may only `read`, `search`, `think`; writers may also `edit`, `delete`, `move`, `execute`; `fetch`, `switch_mode` and `other` are always refused. Octet only ever selects an `allow_once` option, never `allow_always`.
+- Any other method gets "method not found" and is logged.
+
+**Attribution.** One `agent.handshake` event per run records protocol and version, launch command, agent name, title and version, the agent's reported capabilities (capped at 4,000 characters), the session id and, for Claude Code, the model and the MCP servers it connected. A failed handshake (version mismatch, no answer) is recorded with an `error`. Events are attributed to the goal and bead by matching the run's `cwd` to a bead or goal worktree.
+
+**Per-seat selection.** `RoutingRunner` dispatches by `req.seat`, so `Ctx.runner` stays one object. `selectRunner(config, seat, fallback)` returns the ACP runner for a seat named in `[agents]`, else the fallback. `buildRunner({ store, fake? })` is what the daemon and CLI call: Claude Code by default, ACP per seat, all wrapped in `ObservedRunner`, with a `shutdown()` that flushes spans.
+
+**MCP policy** (`mcp-policy.ts`). With no `[mcp]` table nothing changes: the launch still carries `--strict-mcp-config --mcp-config {"mcpServers":{}}`. With an allow-list, `mcpFor` builds the `--mcp-config` JSON and the matching `--allowedTools` entries (`mcp__server__tool` for pinned tools, `mcp__server` for a whole server; headless runs cannot ask, so an MCP tool is usable only if listed). Read-only seats get only servers marked `read_only`. Tool descriptions are untrusted: Octet never reads or forwards them (the agent fetches them from the server); only names written in the config are allowed; every string a server or agent supplies that Octet stores or exports (names, titles, capability blobs) is stripped of control characters and capped (`untrusted()` in `observe.ts`).
+
+**What Claude Code exposes (checked, not assumed).** `claude -p --output-format stream-json --verbose` (Claude Code 2.1.296) prints one JSON object per line: `system`/`init` (`session_id`, `model`, `claude_code_version`, `mcp_servers[{name,status}]`, `tools[]`), `assistant` messages whose `content` holds `text` or `tool_use {id, name, input}` blocks, `user` messages with `tool_result {tool_use_id, content, is_error?}` blocks, and a final `result` (`result` text, `is_error`, `usage`, `total_cost_usd`). An MCP tool is named `mcp__<server>__<tool>`, so MCP calls with their arguments are observable and are logged as `mcp.tool_call` and `mcp.tool_result` events. Gaps:
+
+- A call is seen when the assistant message completes, before its result. This is a record, not a gate: enforcement is the allow-list and `--allowedTools`. The one active check: if `init` lists an MCP server that is not on the seat's allow-list, the run is killed and `agent.permission` records `mcp/connect` as denied.
+- Server-level `--allowedTools mcp__server` (no tool name) was not exercised live; the pinned form `mcp__server__tool` was. Prefer `tools = [...]`.
+- Tool descriptions are not in the audit log, and tool results appear on spans only with content capture on.
+- ACP does not say whether a tool is an MCP tool, so ACP tool calls produce spans but no `mcp.tool_call` audit events. What an ACP agent does with its own tools never passes through Octet.
+- Stream-json is read only when something consumes it (a telemetry endpoint, or a non-empty MCP allow-list for the seat). Otherwise Claude Code is launched exactly as before, with plain text output.
+
+**OpenTelemetry** (`otel-attrs.ts`, `otel.ts`, `observed-runner.ts`). `ObservedRunner` wraps any runner. Per run it emits one `invoke_agent {seat}` span (kind CLIENT) with `gen_ai.operation.name`, `gen_ai.agent.name` (the seat), `gen_ai.provider.name` (`anthropic`, the ACP command's basename, or what the agent reports) and `gen_ai.request.model`; at the end `gen_ai.agent.version`, `gen_ai.conversation.id` (the agent's session id), `gen_ai.usage.input_tokens` / `output_tokens` (Claude Code; input includes cached tokens) and, on failure, `error.type` (`timeout`, `cancelled`, `agent_exit_nonzero`, `exception`) with ERROR status. Octet's own attributes: `octet.goal.id`, `octet.bead.id`, `octet.seat`, `octet.exit_code`, `octet.cost.usd`. Each reported tool call is an `execute_tool {name}` child (`gen_ai.tool.name`, `gen_ai.tool.call.id`, `gen_ai.tool.type` = `extension` for MCP, `function` otherwise); for ACP the name is the tool `kind`, because titles carry paths and commands. All names live in `otel-attrs.ts`. Content (`gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.system_instructions`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`) is written only with `capture_content = true`; a test asserts the prompt, persona, arguments and results are absent from the wire by default. The exporter (`OtlpHttpExporter`: global `fetch`, no dependencies) exists only if `otlp_endpoint` is set. It queues finished spans (at most 2,048, oldest dropped), sends batches of up to 64 every 5 s in the background with a 5 s timeout, never throws, and `shutdown()` flushes (the daemon on SIGINT, the CLI when a command finishes). A dead, failing or hanging collector costs the run nothing; tests cover all three.
+
+**Not verified.**
+
+- No real third-party ACP agent was run (none installed). `AcpRunner` is tested against a scripted agent written from the pinned schema, so a real agent may exercise paths the fixture does not. Known simplifications: `authenticate` is not implemented (the agent must already be logged in); `session/cancel` is not sent (abort kills the process group); `req.model` is ignored (ACP has no standard model selection); only text prompt content is sent; HTTP MCP servers are not passed to ACP agents; the `toolCall` in `session/request_permission` is read defensively because the schema page only shows `toolCallId` there.
+- The ACP policy gates what the protocol lets the agent ask of the client. An agent can still write files or run commands itself, outside the protocol. Real confinement is the sandbox in §1.
+- No real OTLP backend has received the spans; the JSON follows the OTLP/HTTP spec but was checked only against a local capture server. gRPC and protobuf are not supported.
+- Claude Code's stream-json was run live once, to capture event shapes: a single `claude -p --model haiku` prompt in a temp directory, with `--strict-mcp-config`, a local echo MCP server and `--allowedTools mcp__echo__echo`. The trimmed transcript is `packages/core/test/fixtures/claude-mcp-stream.jsonl`; the default suite replays it through a stand-in `claude` script.
+- The account-level connector leak in §8.2 is not explained by this work; `--strict-mcp-config` plus the `init` check make a recurrence detectable.
+
+**Edits to existing files** (small, localized): `runner.ts` (optional `RunRequest.observer`; `ClaudeCodeRunner` takes an options object with `command`, `mcp`, `observe`, `captureResults`; defaults leave behaviour unchanged), `index.ts` (exports), `packages/daemon/src/main.ts` and `packages/cli/src/main.ts` (build the runner with `buildRunner`; flush on exit). `config.ts` is untouched; the new tables are parsed in `interop-config.ts`.
+
 ## 3. Run control and recovery (M)
 
 Done in session two: cancel, timeout, persisted output, heartbeat-based orphan detection, and a bead never stays `running` when the runner throws. Remaining items are listed at the end.
@@ -172,8 +239,8 @@ From [orchestrator-reference.md](orchestrator-reference.md) §12, after the firs
 
 | Area | Status |
 |---|---|
-| OpenTelemetry traces | Not started (§2.3) |
-| MCP / ACP / A2A | Not started (§2.1, §2.2). A2A is only relevant if Octet ever talks to other orchestrators |
+| OpenTelemetry traces | Built (§2.4); not yet seen by a real backend |
+| MCP / ACP / A2A | ACP adapter and MCP allow-lists built (§2.4); not yet run against a real third-party ACP agent. A2A is only relevant if Octet ever talks to other orchestrators |
 | Builder sandboxing | Not started (§1) |
 | Effort scaling | Designed (planning §5), not built |
 | Audit head anchoring | Designed (vault §5), not built |

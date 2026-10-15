@@ -2,7 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import {
-  addBead, addProject, answerClarification, approveBead, cancelBead, ClaudeCodeRunner, createGoal, dbFile, decideApproval, editPlan, FakeRunner, getIdentity,
+  addBead, addProject, answerClarification, approveBead, buildRunner, cancelBead, createGoal, dbFile, decideApproval, editPlan, getIdentity,
   ghToken, IntakeService, loadIdentities, loadIntake, loadJiraCredentials, loadSlackCredentials, loadLimits, loadProjects, ClarificationNeeded, loadGithubHosts, loadPlanning, loadReview, setGithubHosts, OctetError, openVault, planRequest, rejectPlan, rejectRequest, renderPlan, updateProject, verifyPlans, routeRequest, runsDir, submitRequest, refreshAllPrs, requestDelivery, requestPrecomment, reviewBead, reviewExternalPr, runBead, sshWhoAmI, Store, type Ctx,
 } from '@octet/core';
 import { runToolCommand } from './tools.ts';
@@ -50,13 +50,19 @@ const USAGE = `octet <command>
 
 There is no default identity: every project must name one.`;
 
+/** Runners built by makeCtx; flushed once when the command finishes so buffered trace spans are sent. */
+const runners: { shutdown(): Promise<void> }[] = [];
+
 function makeCtx(fake: boolean): Ctx {
   setGithubHosts(loadGithubHosts());
+  const store = new Store(dbFile());
+  const bundle = buildRunner({ store, fake });
+  runners.push(bundle);
   return {
-    store: new Store(dbFile()),
+    store,
     identities: loadIdentities(),
     projects: loadProjects(),
-    runner: fake ? new FakeRunner() : new ClaudeCodeRunner(),
+    runner: bundle.runner,
     limits: loadLimits(),
     review: loadReview(),
     planning: loadPlanning(),
@@ -389,4 +395,4 @@ async function main(argv: string[]): Promise<void> {
 main(process.argv.slice(2)).catch((e) => {
   console.error(e instanceof OctetError ? `octet: ${e.message}` : e);
   process.exitCode = 1;
-});
+}).finally(() => Promise.all(runners.map((r) => r.shutdown())));

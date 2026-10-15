@@ -39,6 +39,14 @@ poll_seconds = 120
 allowed_transitions = ["In Review"]
 [intake.jira.projects.demo]
 jql = "project = X"
+[agents]
+reviewer = "my-agent --acp"
+[mcp.servers.docs]
+command = "docs-mcp"
+[mcp.allow]
+engineer = ["docs"]
+[telemetry]
+capture_content = false
 [intake.chat]
 enabled = true
 allowed_users = ["U1"]

@@ -1,7 +1,10 @@
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { ClaudeStreamParser } from './claude-stream.ts';
 import type { Env } from './git.ts';
+import type { McpLaunch } from './mcp-policy.ts';
+import { notify, type RunObserver } from './observe.ts';
 import type { SeatId } from './seats.ts';
 
 export interface RunRequest {
@@ -17,6 +20,8 @@ export interface RunRequest {
   signal?: AbortSignal;
   /** Kill the agent if it is still running after this long. */
   timeoutMs?: number;
+  /** Told about handshakes, tool calls and permission decisions as they happen; see observe.ts. */
+  observer?: RunObserver;
 }
 
 export interface RunResult {
@@ -38,26 +43,47 @@ export const DENIED_TOOLS = ['Bash(git push:*)', 'Bash(gh pr:*)', 'Bash(gh repo:
 
 const KILL_GRACE_MS = 5000;
 
+export interface ClaudeCodeOptions {
+  /** Executable to start. Default `claude`. */
+  command?: string;
+  /** MCP servers for a run. Default: none, which is also what a missing option means. */
+  mcp?: (req: RunRequest) => McpLaunch;
+  /** Read `--output-format stream-json` so tool calls reach `req.observer`. Off = plain text output, as before. */
+  observe?: (req: RunRequest) => boolean;
+  /** Keep tool results in the events passed to the observer (content capture). */
+  captureResults?: boolean;
+}
+
 export class ClaudeCodeRunner implements AgentRunner {
+  private readonly opts: ClaudeCodeOptions;
+  constructor(opts: ClaudeCodeOptions = {}) {
+    this.opts = opts;
+  }
+
   run(req: RunRequest, onChunk?: (text: string) => void): Promise<RunResult> {
+    const mcp = this.opts.mcp?.(req);
+    const stream = this.opts.observe?.(req) === true;
     const args = [
       '-p',
       '--append-system-prompt', req.systemPrompt,
-      // Builders get no MCP servers: account-level connectors are irrelevant to them and add noise.
-      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+      // Builders get no MCP servers unless the seat's allow-list (mcp-policy.ts) names some.
+      '--strict-mcp-config', '--mcp-config', mcp?.json ?? '{"mcpServers":{}}',
       ...(req.readOnly
-        ? ['--permission-mode', 'default', '--allowedTools', 'Read,Grep,Glob',
+        ? ['--permission-mode', 'default', '--allowedTools', ['Read', 'Grep', 'Glob', ...(mcp?.allowedTools ?? [])].join(','),
           '--disallowedTools', ['Edit', 'Write', 'NotebookEdit', 'Bash', ...DENIED_TOOLS].join(',')]
-        : ['--permission-mode', 'acceptEdits', '--disallowedTools', DENIED_TOOLS.join(',')]),
+        : ['--permission-mode', 'acceptEdits', '--disallowedTools', DENIED_TOOLS.join(','),
+          ...(mcp?.allowedTools.length ? ['--allowedTools', mcp.allowedTools.join(',')] : [])]),
+      ...(stream ? ['--output-format', 'stream-json', '--verbose'] : []),
     ];
     if (req.model) args.push('--model', req.model);
     const started = Date.now();
     return new Promise((resolve, reject) => {
       // Own process group, so a kill reaches everything the agent started, not just `claude`.
-      const child = spawn('claude', args, { cwd: req.cwd, env: req.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+      const child = spawn(this.opts.command ?? 'claude', args, { cwd: req.cwd, env: req.env, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
       let output = '';
       let cancelled = false;
       let timedOut = false;
+      let violation: string | undefined;
       let killTimer: NodeJS.Timeout | undefined;
       const killGroup = (sig: NodeJS.Signals) => {
         try { process.kill(-child.pid!, sig); } catch { /* already gone */ }
@@ -80,14 +106,31 @@ export class ClaudeCodeRunner implements AgentRunner {
         output += s;
         onChunk?.(s);
       };
-      child.stdout.on('data', take);
-      child.stderr.on('data', take);
+      const parser = stream
+        ? new ClaudeStreamParser({
+          text: (s) => onChunk?.(s),
+          raw: (s) => { output += s; onChunk?.(s); },
+          // A server connected that the allow-list did not name: stop before the model can use it.
+          unlistedServer: (name) => {
+            violation = `MCP server "${name}" connected but is not on this seat's allow-list`;
+            notify(req.observer, 'decision', { request: 'mcp/connect', subject: name, allowed: false, reason: 'not on the allow-list' });
+            stop();
+          },
+        }, req.observer, new Set(mcp?.servers ?? []), this.opts.captureResults === true)
+        : undefined;
+      let stderr = '';
+      child.stdout.on('data', parser ? (b: Buffer) => parser.push(b.toString()) : take);
+      child.stderr.on('data', parser ? (b: Buffer) => { stderr += b.toString(); onChunk?.(b.toString()); } : take);
       child.on('error', (e) => { cleanup(); reject(e); });
       child.on('close', (code) => {
         cleanup();
         // Anything left in the group after the leader exits is cleaned up too.
         killGroup('SIGKILL');
-        resolve({ exitCode: code ?? 1, output, durationMs: Date.now() - started, ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}) });
+        if (parser) {
+          parser.end();
+          output = parser.output + output + stderr + (violation ? `\n[octet] ${violation}\n` : '');
+        }
+        resolve({ exitCode: violation ? 1 : code ?? 1, output, durationMs: Date.now() - started, ...(cancelled ? { cancelled } : {}), ...(timedOut ? { timedOut } : {}) });
       });
       child.stdin.end(req.prompt);
     });

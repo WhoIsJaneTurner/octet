@@ -21,6 +21,9 @@ type Kind = 'bool' | 'posint' | 'nonneg' | 'table' | 'string' | 'strings' | { on
 type Schema = Record<string, Kind>;
 type Table = Record<string, unknown>;
 
+/** Sections with dynamic names (seats, server names) that their own parser validates strictly; the table checker leaves them alone. */
+const SELF_VALIDATED = new Set(['agents', 'mcp', 'telemetry']);
+
 /** config.toml. A nested section such as [intake.github] is written `intake.github`. */
 export const CONFIG_SCHEMA: Record<string, Schema> = {
   limits: { max_engineers: 'posint', max_active_goals: 'posint', run_timeout_minutes: 'posint' },
@@ -93,6 +96,7 @@ export function checkConfigDoc(doc: Table): Issue[] {
     for (const [name, v] of Object.entries(t)) {
       const path = prefix ? `${prefix}.${name}` : name;
       const schema = CONFIG_SCHEMA[path];
+      if (SELF_VALIDATED.has(path)) continue;
       if (schema) {
         if (!isTable(v)) out.push({ level: 'error', where: `[${path}]`, message: `expected a table, got ${describe(v)}` });
         else checkTable(v, schema, `[${path}]`, out);
